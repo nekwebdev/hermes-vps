@@ -1159,4 +1159,5 @@ printf '%s %s\n' \
   "$(gum style --foreground 14 "${RECAP_SSH_ALIAS}")"
 
 gum style --foreground 99 "Configuration complete."
-gum style --foreground 99 "Next: run 'just bootstrap'."
+gum style --foreground 99 "Next: run 'just init && just plan'."
+gum style --foreground 99 "If all green: run 'just apply' then 'just bootstrap'."
