@@ -9,15 +9,23 @@
     };
   };
 
-  outputs = { self, nixpkgs, flake-utils, hermes-agent }:
-    flake-utils.lib.eachDefaultSystem (system:
+  outputs =
+    {
+      nixpkgs,
+      flake-utils,
+      hermes-agent,
+      ...
+    }:
+    flake-utils.lib.eachDefaultSystem (
+      system:
       let
         pkgs = import nixpkgs {
           inherit system;
           config.allowUnfree = true;
         };
         hermesPkg = hermes-agent.packages.${system}.default;
-      in {
+      in
+      {
         devShells.default = pkgs.mkShell {
           packages = with pkgs; [
             opentofu
@@ -37,5 +45,6 @@
             hermesPkg
           ];
         };
-      });
+      }
+    );
 }
