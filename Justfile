@@ -349,12 +349,12 @@ up PROVIDER_ARG="":
 
 check PROVIDER_ARG="":
     @set -euo pipefail; \
-    just verify '{{ PROVIDER_ARG }}' PROVIDER='{{ PROVIDER }}'
+    PROVIDER='{{ PROVIDER }}' just verify '{{ PROVIDER_ARG }}'
 
 audit PROVIDER_ARG="":
     @set -euo pipefail; \
-    just hardening-audit '{{ PROVIDER_ARG }}' PROVIDER='{{ PROVIDER }}'
+    PROVIDER='{{ PROVIDER }}' just hardening-audit '{{ PROVIDER_ARG }}'
 
 down CONFIRM="NO" PROVIDER_ARG="":
     @set -euo pipefail; \
-    just destroy CONFIRM='{{ CONFIRM }}' '{{ PROVIDER_ARG }}' PROVIDER='{{ PROVIDER }}'
+    PROVIDER='{{ PROVIDER }}' just destroy CONFIRM='{{ CONFIRM }}' '{{ PROVIDER_ARG }}'
