@@ -71,7 +71,9 @@ if install_if_changed "$SSHD_CANDIDATE" "/etc/ssh/sshd_config" 0644 root root; t
 fi
 
 if [[ "$ssh_changed" -eq 1 ]]; then
-  systemctl restart ssh
+  if ! systemctl reload ssh; then
+    systemctl restart ssh
+  fi
 fi
 
 install_if_changed "$ROOT_DIR/templates/sysctl/99-hardening.conf" "/etc/sysctl.d/99-hardening.conf" 0644 root root || true
@@ -83,7 +85,7 @@ if ! jq -e '
   type == "array" and
   all(
     .[];
-    type == "number" and floor(.) == . and . >= 1 and . <= 65535
+    type == "number" and . == floor and . >= 1 and . <= 65535
   ) and
   (length == (map(tostring) | unique | length))
 ' >/dev/null <<< "$RAW_ALLOWED_TCP_PORTS"; then

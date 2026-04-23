@@ -221,18 +221,19 @@ bootstrap PROVIDER_ARG="": (_preflight PROVIDER_ARG)
       'sudo install -d -m 0700 -o root -g root /root/hermes-vps-stage'; \
     rsync -az --delete --rsync-path="sudo rsync" --chmod=D0700,F0600 \
       -e "ssh -i ${KEY_PATH} -p ${SSH_PORT} -o StrictHostKeyChecking=accept-new" \
-      bootstrap/ templates/ "${ADMIN_USER}@${SERVER_IP}:/root/hermes-vps-stage/"; \
+      bootstrap templates "${ADMIN_USER}@${SERVER_IP}:/root/hermes-vps-stage/"; \
     ssh -i "${KEY_PATH}" -p "${SSH_PORT}" -o StrictHostKeyChecking=accept-new "${ADMIN_USER}@${SERVER_IP}" \
       "sudo bash -c 'set -euo pipefail; \
         install -d -m 0750 /etc/hermes /etc/telegram-gateway; \
         install -m 0600 -o root -g root /root/hermes-vps-stage/bootstrap/runtime/hermes.env /etc/hermes/hermes.env; \
         install -m 0600 -o root -g root /root/hermes-vps-stage/bootstrap/runtime/telegram-gateway.env /etc/telegram-gateway/gateway.env; \
+        bash /root/hermes-vps-stage/bootstrap/10-base.sh; \
+        TF_VAR_allowed_tcp_ports=\"${RAW_ALLOWED_PORTS}\" bash /root/hermes-vps-stage/bootstrap/20-hardening.sh; \
         if [[ -f /root/hermes-vps-stage/bootstrap/runtime/hermes-auth.json ]]; then \
+          id -u hermes >/dev/null 2>&1 || useradd --system --create-home --home-dir /var/lib/hermes --shell /usr/sbin/nologin hermes; \
           install -d -m 0700 -o hermes -g hermes /var/lib/hermes/.hermes; \
           install -m 0600 -o hermes -g hermes /root/hermes-vps-stage/bootstrap/runtime/hermes-auth.json /var/lib/hermes/.hermes/auth.json; \
         fi; \
-        bash /root/hermes-vps-stage/bootstrap/10-base.sh; \
-        TF_VAR_allowed_tcp_ports=\"${RAW_ALLOWED_PORTS}\" bash /root/hermes-vps-stage/bootstrap/20-hardening.sh; \
         HERMES_AGENT_VERSION=\"${HERMES_AGENT_VERSION}\" bash /root/hermes-vps-stage/bootstrap/30-hermes.sh; \
         bash /root/hermes-vps-stage/bootstrap/40-telegram-gateway.sh; \
         bash /root/hermes-vps-stage/bootstrap/90-verify.sh; \
