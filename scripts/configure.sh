@@ -57,6 +57,18 @@ if match:
 PY
 }
 
+server_image_for_provider() {
+  local provider="$1"
+  case "$provider" in
+    linode) printf '%s\n' "linode/debian13" ;;
+    hetzner) printf '%s\n' "debian-13" ;;
+    *)
+      echo "ERROR: unsupported provider for server image mapping: ${provider}" >&2
+      exit 1
+      ;;
+  esac
+}
+
 contains_exact() {
   local needle="$1"
   shift
@@ -667,9 +679,14 @@ else
   PROVIDER="$(gum choose --header "Choose cloud provider" "hetzner" "linode")"
 fi
 set_env_value "TF_VAR_cloud_provider" "${PROVIDER}"
+SERVER_IMAGE="$(server_image_for_provider "${PROVIDER}")"
+set_env_value "TF_VAR_server_image" "${SERVER_IMAGE}"
 printf '%s %s\n' \
   "$(gum style --foreground 10 'Cloud:')" \
   "$(gum style --foreground 14 "${PROVIDER}")"
+printf '%s %s\n' \
+  "$(gum style --foreground 10 'Server image:')" \
+  "$(gum style --foreground 14 "${SERVER_IMAGE}")"
 
 if [[ "${PROVIDER}" == "hetzner" ]]; then
   TOKEN_KEY="HCLOUD_TOKEN"
@@ -1095,6 +1112,9 @@ render_done_box
 printf '%s %s\n' \
   "$(gum style --foreground 10 'Cloud:')" \
   "$(gum style --foreground 14 "${PROVIDER}")"
+printf '%s %s\n' \
+  "$(gum style --foreground 10 'Server image:')" \
+  "$(gum style --foreground 14 "${SERVER_IMAGE}")"
 printf '%s %s\n' \
   "$(gum style --foreground 10 'Region:')" \
   "$(gum style --foreground 14 "${SELECTED_REGION_LABEL}")"
