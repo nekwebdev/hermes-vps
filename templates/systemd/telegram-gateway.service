@@ -8,6 +8,8 @@ Type=simple
 User=tg-gateway
 Group=tg-gateway
 EnvironmentFile=/etc/telegram-gateway/gateway.env
+EnvironmentFile=/etc/hermes/hermes.env
+Environment=HERMES_HOME=/var/lib/telegram-gateway/.hermes
 WorkingDirectory=/opt/telegram-gateway
 ExecStart=/usr/bin/python3 /opt/telegram-gateway/gateway.py
 Restart=on-failure

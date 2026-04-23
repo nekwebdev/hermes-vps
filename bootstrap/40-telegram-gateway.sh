@@ -55,6 +55,12 @@ fi
 
 install -d -m 0750 -o root -g root /etc/telegram-gateway
 install -d -m 0750 -o tg-gateway -g tg-gateway /opt/telegram-gateway
+install -d -m 0750 -o tg-gateway -g tg-gateway /var/lib/telegram-gateway
+install -d -m 0700 -o tg-gateway -g tg-gateway /var/lib/telegram-gateway/.hermes
+
+if [[ -s /var/lib/hermes/.hermes/auth.json ]]; then
+  install -m 0600 -o tg-gateway -g tg-gateway /var/lib/hermes/.hermes/auth.json /var/lib/telegram-gateway/.hermes/auth.json
+fi
 
 if [[ ! -f /etc/telegram-gateway/gateway.env ]]; then
   install -m 0600 -o root -g root /dev/null /etc/telegram-gateway/gateway.env
@@ -139,16 +145,26 @@ def send_message(chat_id: int, text: str) -> None:
 
 def run_hermes(user_text: str) -> str:
     prompt = f"{SYSTEM_PROMPT}\n\nUser message: {user_text}"
+    provider = os.getenv("HERMES_PROVIDER", "auto").strip() or "auto"
+    model = os.getenv("HERMES_MODEL", "").strip()
+
+    cmd = [HERMES_COMMAND, "chat", "-Q", "--provider", provider]
+    if model:
+        cmd.extend(["-m", model])
+    cmd.extend(["-q", prompt])
+
     proc = subprocess.run(
-        [HERMES_COMMAND, "chat", "-q", prompt],
+        cmd,
         capture_output=True,
         text=True,
         check=False,
         timeout=180,
     )
     if proc.returncode != 0:
-        stderr = proc.stderr.strip() or "unknown error"
-        return f"Hermes command failed: {stderr}"
+        stderr = (proc.stderr or "").strip()
+        stdout = (proc.stdout or "").strip()
+        detail = stderr or stdout or f"exit code {proc.returncode}"
+        return f"Hermes command failed: {detail[:700]}"
     output = proc.stdout.strip()
     return output or "(empty response)"
 
@@ -213,6 +229,16 @@ svc_changed=0
 if install_if_changed "$ROOT_DIR/templates/systemd/telegram-gateway.service" "/etc/systemd/system/telegram-gateway.service" 0644 root root; then
   svc_changed=1
 fi
+
+HERMES_PROVIDER_VALUE="$(awk -F= '/^HERMES_PROVIDER=/{print $2; exit}' /etc/hermes/hermes.env)"
+HERMES_PROVIDER_VALUE="${HERMES_PROVIDER_VALUE:-openrouter}"
+HERMES_MODEL_VALUE="$(awk -F= '/^HERMES_MODEL=/{print $2; exit}' /etc/hermes/hermes.env)"
+HERMES_MODEL_VALUE="${HERMES_MODEL_VALUE:-anthropic/claude-sonnet-4}"
+
+sudo -u tg-gateway env HERMES_HOME=/var/lib/telegram-gateway/.hermes \
+  /usr/local/bin/hermes config set model.provider "$HERMES_PROVIDER_VALUE" >/dev/null
+sudo -u tg-gateway env HERMES_HOME=/var/lib/telegram-gateway/.hermes \
+  /usr/local/bin/hermes config set model.default "$HERMES_MODEL_VALUE" >/dev/null
 
 systemctl daemon-reload
 systemctl enable telegram-gateway.service
