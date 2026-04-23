@@ -10,6 +10,7 @@
 **/.tofu.lock.hcl.backup
 **/*.tfstate
 **/*.tfstate.*
+**/tofuplan
 crash.log
 crash.*.log
 override.tf
