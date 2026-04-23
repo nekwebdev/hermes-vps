@@ -48,7 +48,7 @@ fail2ban-client status recidive >/dev/null
 
 echo "[verify] time sync"
 systemctl is-active --quiet systemd-timesyncd
-timedatectl show -p NTPSynchronized --value | grep -q true
+timedatectl show -p NTPSynchronized --value | grep -Eq '^(true|yes)$'
 
 echo "[verify] unattended upgrades"
 systemctl is-enabled --quiet unattended-upgrades

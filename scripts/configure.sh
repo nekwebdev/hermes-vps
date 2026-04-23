@@ -535,6 +535,11 @@ resolve_bundled_hermes_agent_version() {
   hermes --version | awk '{for (i=1; i<=NF; i++) if ($i ~ /^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z]+)*$/) { sub(/^v/, "", $i); print $i; exit }}'
 }
 
+resolve_bundled_hermes_agent_release_tag() {
+  command -v hermes >/dev/null 2>&1 || { echo "ERROR: hermes CLI not found in toolchain." >&2; exit 1; }
+  hermes --version | awk 'match($0, /\(([0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z]+)?)\)/, m) { print "v" m[1]; exit }'
+}
+
 resolve_hermes_python_for_version() {
   local requested_version="$1"
   local bundled_version bundled_python
@@ -815,10 +820,25 @@ if ! [[ "${HERMES_AGENT_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z]+)*$
   exit 1
 fi
 
+LATEST_HERMES_AGENT_RELEASE_TAG="$(resolve_bundled_hermes_agent_release_tag 2>/dev/null || true)"
+if ! [[ "${LATEST_HERMES_AGENT_RELEASE_TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z]+)*$ ]]; then
+  LATEST_HERMES_AGENT_RELEASE_TAG="v2026.4.16"
+fi
+EXISTING_HERMES_AGENT_RELEASE_TAG="$(get_env_value HERMES_AGENT_RELEASE_TAG)"
+if [[ -n "${EXISTING_HERMES_AGENT_RELEASE_TAG}" ]] && [[ "${EXISTING_HERMES_AGENT_RELEASE_TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z]+)*$ ]]; then
+  HERMES_AGENT_RELEASE_TAG="${EXISTING_HERMES_AGENT_RELEASE_TAG}"
+else
+  HERMES_AGENT_RELEASE_TAG="${LATEST_HERMES_AGENT_RELEASE_TAG}"
+fi
+
 set_env_value "HERMES_AGENT_VERSION" "${HERMES_AGENT_VERSION}"
+set_env_value "HERMES_AGENT_RELEASE_TAG" "${HERMES_AGENT_RELEASE_TAG}"
 printf '%s %s\n' \
   "$(gum style --foreground 10 'Hermes Agent version:')" \
   "$(gum style --foreground 14 "${HERMES_AGENT_VERSION}")"
+printf '%s %s\n' \
+  "$(gum style --foreground 10 'Hermes Agent release tag:')" \
+  "$(gum style --foreground 14 "${HERMES_AGENT_RELEASE_TAG}")"
 
 HERMES_PYTHON="$(resolve_hermes_python_for_version "${HERMES_AGENT_VERSION}")"
 prepare_local_hermes_auth_home

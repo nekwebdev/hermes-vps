@@ -103,7 +103,29 @@ apply PROVIDER_ARG="": (_preflight PROVIDER_ARG)
     if [[ -z "$P" ]]; then P="${TF_VAR_cloud_provider:-}"; fi; \
     if [[ -n '{{ PROVIDER_ARG }}' ]]; then P='{{ PROVIDER_ARG }}'; P="${P#PROVIDER=}"; fi; \
     TF_DIR="opentofu/providers/${P}"; \
-    ./scripts/toolchain.sh "TF_VAR_cloud_provider=${P} tofu -chdir=${TF_DIR} apply tofuplan"
+    PLAN_FILE="${TF_DIR}/tofuplan"; \
+    if [[ ! -f "${PLAN_FILE}" ]]; then \
+      echo "INFO: no saved plan found, generating fresh plan."; \
+      ./scripts/toolchain.sh "TF_VAR_cloud_provider=${P} tofu -chdir=${TF_DIR} plan -out=tofuplan"; \
+    fi; \
+    set +e; \
+    APPLY_OUTPUT=$(./scripts/toolchain.sh "TF_VAR_cloud_provider=${P} tofu -chdir=${TF_DIR} apply tofuplan" 2>&1); \
+    APPLY_RC=$?; \
+    set -e; \
+    if [[ "$APPLY_RC" -ne 0 ]]; then \
+      echo "$APPLY_OUTPUT"; \
+      if grep -Eq 'Saved plan is stale|Failed to load .*tofuplan|No such file or directory' <<< "$APPLY_OUTPUT"; then \
+        echo "INFO: saved plan missing/stale, regenerating and retrying apply."; \
+        ./scripts/toolchain.sh "TF_VAR_cloud_provider=${P} tofu -chdir=${TF_DIR} plan -out=tofuplan"; \
+        ./scripts/toolchain.sh "TF_VAR_cloud_provider=${P} tofu -chdir=${TF_DIR} apply tofuplan"; \
+      else \
+        exit "$APPLY_RC"; \
+      fi; \
+    else \
+      echo "$APPLY_OUTPUT"; \
+    fi; \
+    SERVER_IP=$(./scripts/toolchain.sh "TF_VAR_cloud_provider=${P} tofu -chdir=${TF_DIR} output -raw public_ipv4"); \
+    ./scripts/update_ssh_alias.sh .ssh/config hermes-vps "${SERVER_IP}"
 
 destroy CONFIRM="NO" PROVIDER_ARG="": (_preflight PROVIDER_ARG)
     @set -euo pipefail; \
@@ -234,7 +256,7 @@ bootstrap PROVIDER_ARG="": (_preflight PROVIDER_ARG)
           install -d -m 0700 -o hermes -g hermes /var/lib/hermes/.hermes; \
           install -m 0600 -o hermes -g hermes /root/hermes-vps-stage/bootstrap/runtime/hermes-auth.json /var/lib/hermes/.hermes/auth.json; \
         fi; \
-        HERMES_AGENT_VERSION=\"${HERMES_AGENT_VERSION}\" bash /root/hermes-vps-stage/bootstrap/30-hermes.sh; \
+        HERMES_AGENT_VERSION=\"${HERMES_AGENT_VERSION}\" HERMES_AGENT_RELEASE_TAG=\"${HERMES_AGENT_RELEASE_TAG:-}\" bash /root/hermes-vps-stage/bootstrap/30-hermes.sh; \
         bash /root/hermes-vps-stage/bootstrap/40-telegram-gateway.sh; \
         bash /root/hermes-vps-stage/bootstrap/90-verify.sh; \
         find /root/hermes-vps-stage/bootstrap/runtime -maxdepth 1 -type f \( -name \"*.env\" -o -name \"hermes-auth.json\" \) -exec shred -u {} + 2>/dev/null || true; \

@@ -112,7 +112,7 @@ def parse_allowlist(raw: str) -> Set[int]:
     return values
 
 
-TOKEN=requir...EN")
+TOKEN = required_env("TELEGRAM_BOT_TOKEN")
 ALLOWLIST = parse_allowlist(required_env("TELEGRAM_ALLOWLIST_IDS"))
 POLL_TIMEOUT = int(os.getenv("TELEGRAM_POLL_TIMEOUT", "30"))
 HERMES_COMMAND = os.getenv("HERMES_COMMAND", "/usr/local/bin/hermes")
