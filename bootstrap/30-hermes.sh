@@ -13,8 +13,8 @@ fi
 
 # shellcheck disable=SC1091
 source /etc/os-release
-if [[ "${ID:-}" != "debian" || "${VERSION_ID:-}" != "12" ]]; then
-  echo "ERROR: unsupported OS. Expected Debian 12, got ${ID:-unknown} ${VERSION_ID:-unknown}." >&2
+if [[ "${ID:-}" != "debian" || "${VERSION_ID:-}" != "13" ]]; then
+  echo "ERROR: unsupported OS. Expected Debian 13, got ${ID:-unknown} ${VERSION_ID:-unknown}." >&2
   exit 1
 fi
 
@@ -61,9 +61,27 @@ if [[ ! -f /etc/hermes/hermes.env ]]; then
 fi
 chmod 0600 /etc/hermes/hermes.env
 
-if ! grep -Eq '^HERMES_API_KEY=.+$' /etc/hermes/hermes.env; then
-  echo "ERROR: /etc/hermes/hermes.env must contain non-empty HERMES_API_KEY." >&2
-  exit 1
+HERMES_PROVIDER_VALUE="$(awk -F= '/^HERMES_PROVIDER=/{print $2; exit}' /etc/hermes/hermes.env)"
+HERMES_PROVIDER_VALUE="${HERMES_PROVIDER_VALUE:-openrouter}"
+HERMES_PROVIDER_REQUIRES_AUTH_JSON="no"
+case "${HERMES_PROVIDER_VALUE}" in
+  openai-codex|nous|qwen-oauth|google-gemini-cli) HERMES_PROVIDER_REQUIRES_AUTH_JSON="yes" ;;
+esac
+
+if [[ "${HERMES_PROVIDER_REQUIRES_AUTH_JSON}" == "yes" ]]; then
+  if grep -Eq '^HERMES_API_KEY=[^[:space:]].+' /etc/hermes/hermes.env; then
+    :
+  elif [[ -s /var/lib/hermes/.hermes/auth.json ]]; then
+    :
+  else
+    echo "ERROR: OAuth provider ${HERMES_PROVIDER_VALUE} requires either HERMES_API_KEY or /var/lib/hermes/.hermes/auth.json." >&2
+    exit 1
+  fi
+else
+  if ! grep -Eq '^HERMES_API_KEY=[^[:space:]].+' /etc/hermes/hermes.env; then
+    echo "ERROR: /etc/hermes/hermes.env must contain non-empty HERMES_API_KEY." >&2
+    exit 1
+  fi
 fi
 
 : "${HERMES_AGENT_VERSION:?HERMES_AGENT_VERSION must be set (pin required for production)}"

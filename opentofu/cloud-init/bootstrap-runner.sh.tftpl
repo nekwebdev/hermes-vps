@@ -13,8 +13,8 @@ fi
 
 # shellcheck disable=SC1091
 source /etc/os-release
-if [[ "$${ID:-}" != "debian" || "$${VERSION_ID:-}" != "12" ]]; then
-  echo "ERROR: unsupported OS. Expected Debian 12, got $${ID:-unknown} $${VERSION_ID:-unknown}." >&2
+if [[ "$${ID:-}" != "debian" || "$${VERSION_ID:-}" != "13" ]]; then
+  echo "ERROR: unsupported OS. Expected Debian 13, got $${ID:-unknown} $${VERSION_ID:-unknown}." >&2
   exit 1
 fi
 

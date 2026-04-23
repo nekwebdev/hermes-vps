@@ -33,16 +33,16 @@ variable "server_type" {
 }
 
 variable "server_image" {
-  description = "Image slug (must map to Debian 12)"
+  description = "Image slug (must map to Debian 13)"
   type        = string
-  default     = "linode/debian12"
+  default     = "linode/debian13"
 
   validation {
     condition = contains(
-      ["linode/debian12", "private/linode/debian12"],
+      ["linode/debian13", "private/linode/debian13"],
       lower(trimspace(var.server_image))
-    ) || can(regex("debian12$", lower(trimspace(var.server_image))))
-    error_message = "server_image must point to a Debian 12 Linode image."
+    ) || can(regex("debian13$", lower(trimspace(var.server_image))))
+    error_message = "server_image must point to a Debian 13 Linode image."
   }
 }
 

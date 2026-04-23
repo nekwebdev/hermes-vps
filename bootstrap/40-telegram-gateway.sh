@@ -13,8 +13,8 @@ fi
 
 # shellcheck disable=SC1091
 source /etc/os-release
-if [[ "${ID:-}" != "debian" || "${VERSION_ID:-}" != "12" ]]; then
-  echo "ERROR: unsupported OS. Expected Debian 12, got ${ID:-unknown} ${VERSION_ID:-unknown}." >&2
+if [[ "${ID:-}" != "debian" || "${VERSION_ID:-}" != "13" ]]; then
+  echo "ERROR: unsupported OS. Expected Debian 13, got ${ID:-unknown} ${VERSION_ID:-unknown}." >&2
   exit 1
 fi
 
@@ -112,7 +112,7 @@ def parse_allowlist(raw: str) -> Set[int]:
     return values
 
 
-TOKEN = required_env("TELEGRAM_BOT_TOKEN")
+TOKEN=requir...EN")
 ALLOWLIST = parse_allowlist(required_env("TELEGRAM_ALLOWLIST_IDS"))
 POLL_TIMEOUT = int(os.getenv("TELEGRAM_POLL_TIMEOUT", "30"))
 HERMES_COMMAND = os.getenv("HERMES_COMMAND", "/usr/local/bin/hermes")

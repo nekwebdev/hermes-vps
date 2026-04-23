@@ -33,13 +33,13 @@ variable "server_type" {
 }
 
 variable "server_image" {
-  description = "Image slug (must map to Debian 12)"
+  description = "Image slug (must map to Debian 13)"
   type        = string
-  default     = "debian-12"
+  default     = "debian-13"
 
   validation {
-    condition     = lower(trimspace(var.server_image)) == "debian-12"
-    error_message = "server_image must be debian-12 for this baseline."
+    condition     = lower(trimspace(var.server_image)) == "debian-13"
+    error_message = "server_image must be debian-13 for this baseline."
   }
 }
 
