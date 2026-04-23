@@ -20,6 +20,7 @@ override.tf.json
 # SSH/runtime artifacts
 bootstrap/runtime/
 .state-backups/
+.ssh/
 
 # Python caches
 __pycache__/
