@@ -1,0 +1,22 @@
+[DEFAULT]
+bantime = 1h
+findtime = 10m
+maxretry = 5
+backend = systemd
+banaction = nftables-multiport
+banaction_allports = nftables-allports
+action = %(action_)s
+
+[sshd]
+enabled = true
+port = ssh
+logpath = %(sshd_log)s
+maxretry = 5
+
+[recidive]
+enabled = true
+logpath = /var/log/fail2ban.log
+banaction = nftables-allports
+bantime = 1w
+findtime = 1d
+maxretry = 3

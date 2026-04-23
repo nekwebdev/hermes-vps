@@ -1,0 +1,38 @@
+#cloud-config
+package_update: true
+package_upgrade: true
+fqdn: ${hostname}
+manage_etc_hosts: true
+users:
+  - name: ${admin_username}
+    gecos: Primary Admin
+    shell: /bin/bash
+    groups: [sudo, ${admin_group}]
+    sudo: ["ALL=(ALL) NOPASSWD:ALL"]
+    lock_passwd: true
+    ssh_authorized_keys:
+      - ${admin_ssh_public_key}
+
+ssh_pwauth: false
+disable_root: true
+ssh_deletekeys: true
+
+write_files:
+  - path: /etc/motd
+    owner: root:root
+    permissions: "0644"
+    content: |
+      Managed by OpenTofu + cloud-init. Manual edits may be overwritten by bootstrap.
+  - path: /usr/local/sbin/bootstrap-cloud-init.sh
+    owner: root:root
+    permissions: "0755"
+    content: |
+${bootstrap_script}
+
+runcmd:
+  - [ mkdir, -p, /var/log/journal ]
+  - [ systemd-tmpfiles, --create, --prefix, /var/log/journal ]
+  - [ timedatectl, set-ntp, true ]
+  - [ /usr/local/sbin/bootstrap-cloud-init.sh ]
+
+final_message: "cloud-init completed for ${hostname}."

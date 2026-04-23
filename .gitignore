@@ -1,0 +1,31 @@
+# Local environment and secrets
+.env
+*.env.local
+
+# OpenTofu local state and caches
+**/.terraform/
+**/.tofu/
+**/.terraform.lock.hcl.backup
+**/.tofu.lock.hcl
+**/.tofu.lock.hcl.backup
+**/*.tfstate
+**/*.tfstate.*
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# SSH/runtime artifacts
+bootstrap/runtime/
+.state-backups/
+
+# Python caches
+__pycache__/
+*.pyc
+
+# Editor/OS
+.DS_Store
+.idea/
+.vscode/

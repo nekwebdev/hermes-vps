@@ -1,0 +1,42 @@
+# Managed by bootstrap (deterministic replacement)
+# Keep hardening directives in this file only; do not rely on sshd_config.d drop-ins.
+
+Port 22
+Protocol 2
+AddressFamily any
+ListenAddress 0.0.0.0
+ListenAddress ::
+
+PermitRootLogin no
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+ChallengeResponseAuthentication no
+UsePAM yes
+PubkeyAuthentication yes
+AuthenticationMethods publickey
+PermitEmptyPasswords no
+
+AllowGroups sshadmins
+MaxAuthTries 4
+LoginGraceTime 30
+MaxSessions 10
+ClientAliveInterval 300
+ClientAliveCountMax 2
+
+X11Forwarding no
+AllowAgentForwarding no
+AllowTcpForwarding no
+PermitTunnel no
+GatewayPorts no
+
+Ciphers chacha20-poly1305@openssh.com,aes256-gcm@openssh.com,aes128-gcm@openssh.com
+MACs hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com
+KexAlgorithms curve25519-sha256,curve25519-sha256@libssh.org,sntrup761x25519-sha512@openssh.com
+
+PrintMotd no
+PrintLastLog yes
+TCPKeepAlive yes
+Compression no
+UseDNS no
+PermitUserEnvironment no
+Subsystem sftp /usr/lib/openssh/sftp-server
