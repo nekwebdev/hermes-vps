@@ -2,17 +2,18 @@ set shell := ["bash", "-c"]
 set dotenv-load := true
 set quiet := true
 
-# Default provider. Override with either:
+# Provider source of truth is .env (TF_VAR_cloud_provider).
+# Optional override forms:
 #   just PROVIDER=linode plan
-# or (make-style ergonomics):
 #   just plan PROVIDER=linode
-PROVIDER := "hetzner"
+PROVIDER := env_var_or_default("TF_VAR_cloud_provider", "")
 
 @default:
   @printf '%s\n' \
     'hermes-vps Just targets' \
     '' \
     'Core:' \
+    '  just configure' \
     '  just init [PROVIDER=linode]' \
     '  just init-upgrade [PROVIDER=linode]' \
     '  just plan [PROVIDER=linode]' \
@@ -38,6 +39,7 @@ PROVIDER := "hetzner"
 @_preflight PROVIDER_ARG="":
   @set -euo pipefail; \
   P='{{PROVIDER}}'; \
+  if [[ -z "$P" ]]; then P="${TF_VAR_cloud_provider:-}"; fi; \
   if [[ -n '{{PROVIDER_ARG}}' ]]; then \
     if [[ '{{PROVIDER_ARG}}' =~ ^PROVIDER=(hetzner|linode)$ ]]; then \
       P='{{PROVIDER_ARG}}'; \
@@ -66,9 +68,14 @@ PROVIDER := "hetzner"
     exit 1; \
   fi
 
+configure:
+  @set -euo pipefail; \
+  TOOLCHAIN_QUIET=1 ./scripts/toolchain.sh "CONFIGURE_ALT_SCREEN=1 ./scripts/configure.sh"
+
 init PROVIDER_ARG="": (_preflight PROVIDER_ARG)
   @set -euo pipefail; \
   P='{{PROVIDER}}'; \
+  if [[ -z "$P" ]]; then P="${TF_VAR_cloud_provider:-}"; fi; \
   if [[ -n '{{PROVIDER_ARG}}' ]]; then P='{{PROVIDER_ARG}}'; P="${P#PROVIDER=}"; fi; \
   TF_DIR="opentofu/providers/${P}"; \
   ./scripts/toolchain.sh "TF_VAR_cloud_provider=${P} tofu -chdir=${TF_DIR} init"
@@ -76,6 +83,7 @@ init PROVIDER_ARG="": (_preflight PROVIDER_ARG)
 init-upgrade PROVIDER_ARG="": (_preflight PROVIDER_ARG)
   @set -euo pipefail; \
   P='{{PROVIDER}}'; \
+  if [[ -z "$P" ]]; then P="${TF_VAR_cloud_provider:-}"; fi; \
   if [[ -n '{{PROVIDER_ARG}}' ]]; then P='{{PROVIDER_ARG}}'; P="${P#PROVIDER=}"; fi; \
   TF_DIR="opentofu/providers/${P}"; \
   ./scripts/toolchain.sh "TF_VAR_cloud_provider=${P} tofu -chdir=${TF_DIR} init -upgrade"
@@ -83,6 +91,7 @@ init-upgrade PROVIDER_ARG="": (_preflight PROVIDER_ARG)
 plan PROVIDER_ARG="": (_preflight PROVIDER_ARG)
   @set -euo pipefail; \
   P='{{PROVIDER}}'; \
+  if [[ -z "$P" ]]; then P="${TF_VAR_cloud_provider:-}"; fi; \
   if [[ -n '{{PROVIDER_ARG}}' ]]; then P='{{PROVIDER_ARG}}'; P="${P#PROVIDER=}"; fi; \
   TF_DIR="opentofu/providers/${P}"; \
   ./scripts/toolchain.sh "TF_VAR_cloud_provider=${P} tofu -chdir=${TF_DIR} plan -out=tofuplan"
@@ -90,6 +99,7 @@ plan PROVIDER_ARG="": (_preflight PROVIDER_ARG)
 apply PROVIDER_ARG="": (_preflight PROVIDER_ARG)
   @set -euo pipefail; \
   P='{{PROVIDER}}'; \
+  if [[ -z "$P" ]]; then P="${TF_VAR_cloud_provider:-}"; fi; \
   if [[ -n '{{PROVIDER_ARG}}' ]]; then P='{{PROVIDER_ARG}}'; P="${P#PROVIDER=}"; fi; \
   TF_DIR="opentofu/providers/${P}"; \
   ./scripts/toolchain.sh "TF_VAR_cloud_provider=${P} tofu -chdir=${TF_DIR} apply tofuplan"
@@ -104,6 +114,7 @@ destroy CONFIRM="NO" PROVIDER_ARG="": (_preflight PROVIDER_ARG)
     exit 1; \
   fi; \
   P='{{PROVIDER}}'; \
+  if [[ -z "$P" ]]; then P="${TF_VAR_cloud_provider:-}"; fi; \
   if [[ -n '{{PROVIDER_ARG}}' ]]; then P='{{PROVIDER_ARG}}'; P="${P#PROVIDER=}"; fi; \
   TF_DIR="opentofu/providers/${P}"; \
   umask 077; \
@@ -126,6 +137,7 @@ destroy CONFIRM="NO" PROVIDER_ARG="": (_preflight PROVIDER_ARG)
 bootstrap PROVIDER_ARG="": (_preflight PROVIDER_ARG)
   @set -euo pipefail; \
   P='{{PROVIDER}}'; \
+  if [[ -z "$P" ]]; then P="${TF_VAR_cloud_provider:-}"; fi; \
   if [[ -n '{{PROVIDER_ARG}}' ]]; then P='{{PROVIDER_ARG}}'; P="${P#PROVIDER=}"; fi; \
   TF_DIR="opentofu/providers/${P}"; \
   SERVER_IP=$(./scripts/toolchain.sh "TF_VAR_cloud_provider=${P} tofu -chdir=${TF_DIR} output -raw public_ipv4"); \
@@ -150,7 +162,20 @@ bootstrap PROVIDER_ARG="": (_preflight PROVIDER_ARG)
     echo "ERROR: SSH private key permissions are too broad (${KEY_MODE}). Fix: chmod 600 ${KEY_PATH}"; \
     exit 1; \
   fi; \
-  : "${HERMES_API_KEY:?ERROR: HERMES_API_KEY must be set in .env}"; \
+  HERMES_PROVIDER_VALUE="${TF_VAR_hermes_provider:-openrouter}"; \
+  HERMES_PROVIDER_REQUIRES_AUTH_JSON="no"; \
+  case "${HERMES_PROVIDER_VALUE}" in \
+    openai-codex|nous|qwen-oauth|google-gemini-cli) HERMES_PROVIDER_REQUIRES_AUTH_JSON="yes" ;; \
+  esac; \
+  HERMES_AUTH_JSON_LOCAL="bootstrap/runtime/hermes-auth.json"; \
+  if [[ "${HERMES_PROVIDER_REQUIRES_AUTH_JSON}" == "yes" ]]; then \
+    if [[ ! -s "${HERMES_AUTH_JSON_LOCAL}" ]] && [[ -z "${HERMES_API_KEY:-}" || "${HERMES_API_KEY:-}" == "***" ]]; then \
+      echo "ERROR: OAuth provider ${HERMES_PROVIDER_VALUE} selected but no auth artifact found at ${HERMES_AUTH_JSON_LOCAL}. Run just configure and complete Hermes login."; \
+      exit 1; \
+    fi; \
+  else \
+    : "${HERMES_API_KEY:?ERROR: HERMES_API_KEY must be set in .env}"; \
+  fi; \
   : "${HERMES_AGENT_VERSION:?ERROR: HERMES_AGENT_VERSION must be set in .env}"; \
   : "${TELEGRAM_BOT_TOKEN:?ERROR: TELEGRAM_BOT_TOKEN must be set in .env}"; \
   : "${TELEGRAM_ALLOWLIST_IDS:?ERROR: TELEGRAM_ALLOWLIST_IDS must be set in .env}"; \
@@ -179,7 +204,7 @@ bootstrap PROVIDER_ARG="": (_preflight PROVIDER_ARG)
   umask 077; \
   printf '%s\n' \
     "HERMES_MODEL=${TF_VAR_hermes_model:-anthropic/claude-sonnet-4}" \
-    "HERMES_PROVIDER=${TF_VAR_hermes_provider:-openrouter}" \
+    "HERMES_PROVIDER=${HERMES_PROVIDER_VALUE}" \
     "HERMES_API_KEY=${HERMES_API_KEY:-}" \
     "HERMES_AGENT_VERSION=${HERMES_AGENT_VERSION:-}" \
     > bootstrap/runtime/hermes.env; \
@@ -201,16 +226,21 @@ bootstrap PROVIDER_ARG="": (_preflight PROVIDER_ARG)
       install -d -m 0750 /etc/hermes /etc/telegram-gateway; \
       install -m 0600 -o root -g root /root/hermes-vps-stage/bootstrap/runtime/hermes.env /etc/hermes/hermes.env; \
       install -m 0600 -o root -g root /root/hermes-vps-stage/bootstrap/runtime/telegram-gateway.env /etc/telegram-gateway/gateway.env; \
+      if [[ -f /root/hermes-vps-stage/bootstrap/runtime/hermes-auth.json ]]; then \
+        install -d -m 0700 -o hermes -g hermes /var/lib/hermes/.hermes; \
+        install -m 0600 -o hermes -g hermes /root/hermes-vps-stage/bootstrap/runtime/hermes-auth.json /var/lib/hermes/.hermes/auth.json; \
+      fi; \
       bash /root/hermes-vps-stage/bootstrap/10-base.sh; \
       TF_VAR_allowed_tcp_ports=\"${RAW_ALLOWED_PORTS}\" bash /root/hermes-vps-stage/bootstrap/20-hardening.sh; \
       HERMES_AGENT_VERSION=\"${HERMES_AGENT_VERSION}\" bash /root/hermes-vps-stage/bootstrap/30-hermes.sh; \
       bash /root/hermes-vps-stage/bootstrap/40-telegram-gateway.sh; \
       bash /root/hermes-vps-stage/bootstrap/90-verify.sh; \
-      find /root/hermes-vps-stage/bootstrap/runtime -maxdepth 1 -type f -name \"*.env\" -exec shred -u {} + 2>/dev/null || true; \
+      find /root/hermes-vps-stage/bootstrap/runtime -maxdepth 1 -type f \( -name \"*.env\" -o -name \"hermes-auth.json\" \) -exec shred -u {} + 2>/dev/null || true; \
       rm -rf /root/hermes-vps-stage/bootstrap/runtime'"
 verify PROVIDER_ARG="": (_preflight PROVIDER_ARG)
   @set -euo pipefail; \
   P='{{PROVIDER}}'; \
+  if [[ -z "$P" ]]; then P="${TF_VAR_cloud_provider:-}"; fi; \
   if [[ -n '{{PROVIDER_ARG}}' ]]; then P='{{PROVIDER_ARG}}'; P="${P#PROVIDER=}"; fi; \
   TF_DIR="opentofu/providers/${P}"; \
   SERVER_IP=$(./scripts/toolchain.sh "TF_VAR_cloud_provider=${P} tofu -chdir=${TF_DIR} output -raw public_ipv4"); \
@@ -232,6 +262,7 @@ verify PROVIDER_ARG="": (_preflight PROVIDER_ARG)
 logs SERVICE="all" PROVIDER_ARG="": (_preflight PROVIDER_ARG)
   @set -euo pipefail; \
   P='{{PROVIDER}}'; \
+  if [[ -z "$P" ]]; then P="${TF_VAR_cloud_provider:-}"; fi; \
   if [[ -n '{{PROVIDER_ARG}}' ]]; then P='{{PROVIDER_ARG}}'; P="${P#PROVIDER=}"; fi; \
   TF_DIR="opentofu/providers/${P}"; \
   SERVER_IP=$(./scripts/toolchain.sh "TF_VAR_cloud_provider=${P} tofu -chdir=${TF_DIR} output -raw public_ipv4"); \
@@ -265,6 +296,7 @@ logs SERVICE="all" PROVIDER_ARG="": (_preflight PROVIDER_ARG)
 hardening-audit PROVIDER_ARG="": (_preflight PROVIDER_ARG)
   @set -euo pipefail; \
   P='{{PROVIDER}}'; \
+  if [[ -z "$P" ]]; then P="${TF_VAR_cloud_provider:-}"; fi; \
   if [[ -n '{{PROVIDER_ARG}}' ]]; then P='{{PROVIDER_ARG}}'; P="${P#PROVIDER=}"; fi; \
   TF_DIR="opentofu/providers/${P}"; \
   SERVER_IP=$(./scripts/toolchain.sh "TF_VAR_cloud_provider=${P} tofu -chdir=${TF_DIR} output -raw public_ipv4"); \
