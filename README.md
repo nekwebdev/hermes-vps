@@ -1,9 +1,9 @@
-# OpenTofu + cloud-init + idempotent bootstrap VPS baseline (Debian 12)
+# OpenTofu + cloud-init + idempotent bootstrap VPS baseline (Debian 13)
 
 Single-person production VPS baseline that supports both Hetzner and Linode from one repository, with local OpenTofu state, CIS L1-inspired hardening, Hermes Agent, and Telegram gateway.
 
 ## Why nftables (instead of ufw)
-Debian 12 uses nftables natively. Choosing nftables removes an extra abstraction layer, keeps rules deterministic in `/etc/nftables.conf`, and aligns directly with fail2ban `nftables-*` actions.
+Debian 13 uses nftables natively. Choosing nftables removes an extra abstraction layer, keeps rules deterministic in `/etc/nftables.conf`, and aligns directly with fail2ban `nftables-*` actions.
 
 ## Threat model assumptions
 - Internet-exposed single VPS with SSH as primary admin entry point.
@@ -33,17 +33,19 @@ Note: you do not need local OpenTofu/Just preinstalled because the flake supplie
 
 ## Fresh clone quickstart
 1. Clone and enter repo.
-2. Copy env template and fill values.
-   - Set `HERMES_AGENT_VERSION` to a pinned release version (required by bootstrap).
-   - Keep `.env` permissions strict (`chmod 600 .env`), because Justfile preflight enforces this.
-3. Run deploy flow with Just targets.
+2. Run interactive configuration (`just configure`).
+   - Creates `.env` from `.env.example` if missing.
+   - Enforces `.env` mode `600`.
+   - Prompts provider selection (`hetzner` or `linode`).
+   - Guides token creation for selected provider and writes token into `.env`.
+3. Fill remaining `.env` values (SSH key, hostname, Hermes/Telegram secrets, etc.).
+4. Run deploy flow with Just targets.
 
 ```bash
 git clone <your-repo-url> hermes-vps
 cd hermes-vps
-cp .env.example .env
-chmod 600 .env
-# edit .env with real values
+just configure
+# fill remaining .env values with real secrets/paths
 
 just init
 # optional explicit provider/plugin refresh
@@ -56,7 +58,7 @@ just verify
 
 ## Provider selection flow
 The Just interface uses one provider selector variable:
-- `PROVIDER` (default: `hetzner`)
+- `PROVIDER` defaults to `.env` value `TF_VAR_cloud_provider`
 - Override per command, for example: `just plan PROVIDER=linode`
 
 Provider API token values still come from `.env`:
