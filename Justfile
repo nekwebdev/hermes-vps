@@ -320,9 +320,9 @@ hardening-audit PROVIDER_ARG="": (_preflight PROVIDER_ARG)
 
 up PROVIDER_ARG="":
     @set -euo pipefail; \
-    just init '{{ PROVIDER_ARG }}' PROVIDER='{{ PROVIDER }}'; \
-    just plan '{{ PROVIDER_ARG }}' PROVIDER='{{ PROVIDER }}'; \
-    just apply '{{ PROVIDER_ARG }}' PROVIDER='{{ PROVIDER }}'
+    PROVIDER='{{ PROVIDER }}' just init '{{ PROVIDER_ARG }}'; \
+    PROVIDER='{{ PROVIDER }}' just plan '{{ PROVIDER_ARG }}'; \
+    PROVIDER='{{ PROVIDER }}' just apply '{{ PROVIDER_ARG }}'
 
 check PROVIDER_ARG="":
     @set -euo pipefail; \

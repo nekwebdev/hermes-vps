@@ -16,10 +16,6 @@ variable "linode_token" {
   nullable    = true
   sensitive   = true
 
-  validation {
-    condition     = var.linode_token == null || length(trimspace(var.linode_token)) > 0
-    error_message = "If linode_token is set, it must be non-empty."
-  }
 }
 
 variable "server_location" {

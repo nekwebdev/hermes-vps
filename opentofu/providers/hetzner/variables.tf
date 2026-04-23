@@ -16,10 +16,6 @@ variable "hcloud_token" {
   nullable    = true
   sensitive   = true
 
-  validation {
-    condition     = var.hcloud_token == null || length(trimspace(var.hcloud_token)) > 0
-    error_message = "If hcloud_token is set, it must be non-empty."
-  }
 }
 
 variable "server_location" {
