@@ -24,6 +24,8 @@ from textual.widgets import (
 )
 
 from scripts import configure_logic as logic
+from scripts.configure_async import CorrelatedTask
+from scripts.configure_flow import FlowCoordinator
 from scripts.configure_services import ConfigureOrchestrator, ConfigureServiceError
 from scripts.configure_state import (
     LabeledValue,
@@ -31,7 +33,9 @@ from scripts.configure_state import (
     choose_seed,
     rotate_to_seed,
 )
+from scripts.configure_steps import EXTRACTED_CONTROLLERS
 from scripts.toolchain_guard import ensure_expected_toolchain_runtime
+from scripts.wizard_framework import StepRegistry
 
 _HERMES_LOADING_MODEL_SENTINEL = "__loading__"
 
@@ -107,17 +111,19 @@ class HermesOAuthFinished(Message):
 
 
 class HermesApiKeyValidated(Message):
-    def __init__(self, status: str = "", error: str = "") -> None:
+    def __init__(self, status: str = "", error: str = "", request_id: int = 0) -> None:
         super().__init__()
         self.status = status
         self.error = error
+        self.request_id = request_id
 
 
 class TelegramValidated(Message):
-    def __init__(self, status: str = "", error: str = "") -> None:
+    def __init__(self, status: str = "", error: str = "", request_id: int = 0) -> None:
         super().__init__()
         self.status = status
         self.error = error
+        self.request_id = request_id
 
 
 @dataclass(frozen=True)
@@ -169,7 +175,10 @@ class ConfigureTUI(App[list[tuple[str, str, str]] | None]):
         self.root_dir = root_dir
         self.orchestrator = orchestrator or ConfigureOrchestrator(root_dir)
         self.state = self.orchestrator.load_initial_state()
-        self.step_complete: dict[int, bool] = {}
+        self._coordinator = FlowCoordinator(step_count=len(self.steps))
+        self._step_registry = StepRegistry()
+        for controller_cls in EXTRACTED_CONTROLLERS:
+            self._step_registry.register(controller_cls(self))
 
         self.location_options: list[LabeledValue] = []
         self.server_type_options: list[LabeledValue] = []
@@ -183,8 +192,9 @@ class ConfigureTUI(App[list[tuple[str, str, str]] | None]):
         self._pending_cloud_validation_next = False
         self._pending_telegram_validation_next = False
         self._pending_cloud_validation_request_id: int | None = None
-        self._active_cloud_request_id: int = 0
-        self._cloud_request_seq: int = 0
+        self._cloud_task = CorrelatedTask()
+        self._telegram_task = CorrelatedTask()
+        self._hermes_api_key_task = CorrelatedTask()
         self._hermes_api_key_validating = False
         self._pending_hermes_api_key_validation_next = False
         self._suppress_hermes_provider_change = False
@@ -225,17 +235,33 @@ class ConfigureTUI(App[list[tuple[str, str, str]] | None]):
                     yield Button("Cancel", id="cancel", variant="error")
         yield Footer()
 
+    @property
+    def step_complete(self) -> dict[int, bool]:
+        return self._coordinator.completed_steps
+
+    @property
+    def _active_cloud_request_id(self) -> int:
+        return self._cloud_task.active_id
+
+    @_active_cloud_request_id.setter
+    def _active_cloud_request_id(self, value: int) -> None:
+        self._cloud_task.force_active(value)
+
     def on_mount(self) -> None:
         return
 
     def on_ready(self) -> None:
         self._ui_ready = True
+        if self._coordinator.current_step != self.current_step:
+            self._coordinator.jump_to(self.current_step)
         self._refresh_rail()
         self._render_step()
 
     def watch_current_step(self, _old: int, new: int) -> None:
         if not self._ui_ready:
             return
+        if self._coordinator.current_step != new:
+            self._coordinator.jump_to(new)
         self.query_one("#progress", ProgressBar).update(progress=new + 1)
         self._refresh_rail()
         self._render_step()
@@ -321,12 +347,13 @@ class ConfigureTUI(App[list[tuple[str, str, str]] | None]):
             form.remove_children()
 
             step = self.steps[self.current_step].key
-            if step == "cloud":
+            controller = self._step_registry.get(step)
+            if controller is not None:
+                controller.mount(form)
+            elif step == "cloud":
                 self._mount_cloud(form)
                 if not self._cloud_loading:
                     self._load_cloud_options()
-            elif step == "server":
-                self._mount_server(form)
             elif step == "hermes":
                 self._mount_hermes(form)
                 self.call_after_refresh(self._refresh_hermes_provider_model_ui)
@@ -334,10 +361,6 @@ class ConfigureTUI(App[list[tuple[str, str, str]] | None]):
                     not self.hermes_provider_options or not self.hermes_model_options
                 ):
                     self._load_hermes_options()
-            elif step == "telegram":
-                self._mount_telegram(form)
-            else:
-                self._mount_review(form)
 
             self.query_one("#back", Button).disabled = self.current_step == 0
             self.query_one("#next", Button).label = (
@@ -448,98 +471,6 @@ class ConfigureTUI(App[list[tuple[str, str, str]] | None]):
             f"Server image mapping: {self.state.server_image}"
         )
         self.query_one("#error", Static).update("")
-
-    def _mount_server(self, form: Vertical) -> None:
-        provider_name = "Hetzner" if self.state.provider == "hetzner" else "Linode"
-
-        form.mount(Label("Server and SSH profile", classes="section-title"))
-
-        form.mount(Label(f"{provider_name} region", classes="section-title"))
-        location_seed = ""
-        if self.location_options:
-            location_seed = choose_seed(
-                [item.value for item in self.location_options],
-                existing=self.state.location,
-            )
-            self.state.location = location_seed
-        location = Select[str](
-            options=[(item.label, item.value) for item in self.location_options],
-            allow_blank=False,
-            id="location-select",
-            value=location_seed if location_seed else Select.BLANK,
-        )
-        form.mount(location)
-
-        form.mount(Label(f"{provider_name} server type", classes="section-title"))
-        server_type_seed = ""
-        if self.server_type_options:
-            preferred = next(
-                (item.value for item in self.server_type_options if item.recommended),
-                "",
-            )
-            server_type_seed = choose_seed(
-                [item.value for item in self.server_type_options],
-                existing=self.state.server_type,
-                preferred=preferred,
-            )
-            self.state.server_type = server_type_seed
-        server_type = Select[str](
-            options=[(item.label, item.value) for item in self.server_type_options],
-            allow_blank=False,
-            id="server-type-select",
-            value=server_type_seed if server_type_seed else Select.BLANK,
-        )
-        form.mount(server_type)
-
-        form.mount(Label("Hostname", classes="section-title"))
-        form.mount(
-            Input(
-                value="",
-                placeholder=self.state.hostname or "Hostname",
-                id="hostname-input",
-            )
-        )
-
-        form.mount(Label("Admin username", classes="section-title"))
-        form.mount(
-            Input(
-                value="",
-                placeholder=self.state.admin_username or "Admin username",
-                id="admin-user-input",
-            )
-        )
-
-        form.mount(Label("SSH group", classes="section-title"))
-        form.mount(
-            Input(
-                value="",
-                placeholder=self.state.admin_group or "SSH group",
-                id="admin-group-input",
-            )
-        )
-
-        form.mount(Label("SSH private key path", classes="section-title"))
-        form.mount(
-            Static(self._ssh_key_status_text(), classes="hint", id="ssh-key-status")
-        )
-        form.mount(
-            Checkbox(
-                "Ensure 'ssh hermes-vps' alias is present",
-                value=self.state.add_ssh_alias,
-                id="ssh-alias-toggle",
-            )
-        )
-
-    def _ssh_key_status_text(self) -> str:
-        existing = (
-            self.state.original_values.get("BOOTSTRAP_SSH_PRIVATE_KEY_PATH") or ""
-        ).strip()
-        if existing:
-            return f"Present in .env: {existing}"
-        planned = self.state.ssh_private_key_path or str(
-            pathlib.Path.home() / ".ssh" / "hermes-vps"
-        )
-        return f"Will be created at apply: {planned}"
 
     def _mount_hermes(self, form: Vertical) -> None:
         form.mount(Label("Hermes agent version", classes="section-title"))
@@ -767,125 +698,6 @@ class ConfigureTUI(App[list[tuple[str, str, str]] | None]):
         except NoMatches:
             self.set_timer(0.05, self._refresh_hermes_provider_model_ui)
 
-    def _mount_telegram(self, form: Vertical) -> None:
-        form.mount(Label("How to get telegram token", classes="section-title"))
-        form.mount(
-            Static(
-                "1) Open https://web.telegram.org/k/#@BotFather and chat with @BotFather",
-                classes="hint",
-            )
-        )
-        form.mount(Static("2) Run /newbot and follow prompts", classes="hint"))
-        form.mount(Static("3) Copy bot token from BotFather", classes="hint"))
-
-        form.mount(
-            Label(
-                "Telegram bot token", classes="section-title", id="telegram-token-title"
-            )
-        )
-        form.mount(Input(password=True, id="telegram-token-input"))
-
-        form.mount(Label("How to get Telegram ID", classes="section-title"))
-        form.mount(
-            Static(
-                "1) Open https://web.telegram.org/k/#@userinfobot (or https://web.telegram.org/k/#@RawDataBot)",
-                classes="hint",
-            )
-        )
-        form.mount(
-            Static(
-                "2) Send any message, then copy numeric user id(s) (you can use multiple comma-separated IDs)",
-                classes="hint",
-            )
-        )
-
-        form.mount(Label("Telegram allowlist IDs", classes="section-title"))
-        form.mount(
-            Input(
-                value=self.state.telegram_allowlist_ids,
-                placeholder="12345,-100987654321",
-                id="telegram-allowlist-input",
-            )
-        )
-        self._refresh_telegram_token_ui()
-
-    def _mount_review(self, form: Vertical) -> None:
-        form.mount(Label("Review changes before apply", classes="section-title"))
-        lines: list[str] = []
-        for key, old, new in self.state.recap_rows():
-            if key == "SSH_ALIAS":
-                lines.append(f"SSH alias: {new or '<empty>'}")
-                continue
-            lines.append(
-                f"{key}: {self._review_mask_value(key, old)} -> {self._review_mask_value(key, new)}"
-            )
-
-        lines.extend(self._review_hermes_auth_lines())
-        if not lines:
-            lines.append("No changes to apply.")
-        form.mount(Static("\n".join(lines), id="review-diff"))
-
-    @staticmethod
-    def _review_mask_value(key: str, value: str) -> str:
-        text = (value or "").strip()
-        if not text:
-            return "<empty>"
-        upper_key = key.upper()
-        if "TOKEN" in upper_key or "KEY" in upper_key:
-            return "***"
-        return text
-
-    def _review_hermes_auth_lines(self) -> list[str]:
-        lines: list[str] = []
-        original_api_key = (self.state.original_values.get("HERMES_API_KEY", "") or "").strip()
-        api_key_was_set = bool(original_api_key)
-        api_key_will_be_set = False
-        if self.state.hermes_auth_method == "api_key":
-            api_key_will_be_set = bool(self.state.hermes_api_key_input.strip() or original_api_key)
-
-        if api_key_was_set and not api_key_will_be_set:
-            lines.append("HERMES_API_KEY: *** -> <empty>")
-        elif (not api_key_was_set) and api_key_will_be_set:
-            lines.append("HERMES_API_KEY: <empty> -> ***")
-
-        artifact_before = (self.state.original_values.get("HERMES_AUTH_ARTIFACT", "") or "").strip()
-        artifact_will_exist = self.state.hermes_auth_method == "oauth"
-        artifact_path = str(
-            getattr(
-                self.orchestrator.hermes,
-                "auth_artifact",
-                self.root_dir / "bootstrap" / "runtime" / "hermes-auth.json",
-            )
-        )
-
-        if not artifact_before and artifact_will_exist:
-            lines.append(f"New Hermes authentication artifact: {artifact_path}")
-        elif artifact_before and not artifact_will_exist:
-            lines.append(f"Delete Hermes authentication artifact: {artifact_before}")
-
-        return lines
-
-    def _refresh_telegram_token_ui(self) -> None:
-        if self.steps[self.current_step].key != "telegram":
-            return
-        token_present = self.orchestrator.telegram_token_present()
-        replace_effective = (not token_present) or bool(
-            self.state.telegram_bot_token_input
-        )
-        self.state.telegram_bot_token_replace = replace_effective
-
-        title = self.query_one("#telegram-token-title", Label)
-        token_input = self.query_one("#telegram-token-input", Input)
-
-        if token_present:
-            title.update("Existing Telegram bot token")
-            token_input.placeholder = (
-                "Paste new TELEGRAM_BOT_TOKEN to replace current one"
-            )
-        else:
-            title.update("Enter Telegram bot token")
-            token_input.placeholder = "Paste TELEGRAM_BOT_TOKEN"
-
     @on(Button.Pressed, "#next")
     def _next_btn(self) -> None:
         self.action_next()
@@ -967,11 +779,14 @@ class ConfigureTUI(App[list[tuple[str, str, str]] | None]):
             self._validate_telegram_step()
             return
 
-        self.step_complete[self.current_step] = True
-        if self.current_step == len(self.steps) - 1:
+        self._advance_and_render()
+
+    def _advance_and_render(self) -> None:
+        result = self._coordinator.advance()
+        if result.finished:
             self._apply_and_exit()
-        else:
-            self.current_step += 1
+            return
+        self.current_step = result.next_step
 
     def _cloud_next_requires_live_token_validation(self) -> bool:
         token_present = self.orchestrator.provider_token_present(self.state)
@@ -985,8 +800,7 @@ class ConfigureTUI(App[list[tuple[str, str, str]] | None]):
             self._pending_cloud_validation_next = False
             return
 
-        self.step_complete[self.current_step] = True
-        self.current_step += 1
+        self._advance_and_render()
 
     def _persist_telegram_step_and_advance(self) -> None:
         try:
@@ -996,12 +810,12 @@ class ConfigureTUI(App[list[tuple[str, str, str]] | None]):
             self._pending_telegram_validation_next = False
             return
 
-        self.step_complete[self.current_step] = True
-        self.current_step += 1
+        self._advance_and_render()
 
     def action_back(self) -> None:
-        if self.current_step > 0:
-            self.current_step -= 1
+        result = self._coordinator.back()
+        if result.next_step != self.current_step:
+            self.current_step = result.next_step
 
     def action_cancel(self) -> None:
         self.push_screen(
@@ -1011,6 +825,9 @@ class ConfigureTUI(App[list[tuple[str, str, str]] | None]):
 
     def _capture_state_from_widgets(self) -> bool:
         step = self.steps[self.current_step].key
+        controller = self._step_registry.get(step)
+        if controller is not None:
+            return controller.capture()
         try:
             if step == "cloud":
                 self.state.provider = (
@@ -1028,48 +845,6 @@ class ConfigureTUI(App[list[tuple[str, str, str]] | None]):
                 self.state.provider_token_replace = not token_present or bool(
                     self.state.provider_token_input
                 )
-            elif step == "server":
-                self.state.location = (
-                    self.query_one("#location-select", Select).value or ""
-                )
-                self.state.server_type = (
-                    self.query_one("#server-type-select", Select).value or ""
-                )
-
-                hostname_input = self.query_one("#hostname-input", Input).value.strip()
-                self.state.hostname = (
-                    hostname_input
-                    or self.state.hostname
-                    or (self.state.original_values.get("TF_VAR_hostname", "").strip())
-                )
-
-                admin_user_input = self.query_one(
-                    "#admin-user-input", Input
-                ).value.strip()
-                self.state.admin_username = (
-                    admin_user_input
-                    or self.state.admin_username
-                    or (
-                        self.state.original_values.get(
-                            "TF_VAR_admin_username", ""
-                        ).strip()
-                    )
-                )
-
-                admin_group_input = self.query_one(
-                    "#admin-group-input", Input
-                ).value.strip()
-                self.state.admin_group = (
-                    admin_group_input
-                    or self.state.admin_group
-                    or (
-                        self.state.original_values.get("TF_VAR_admin_group", "").strip()
-                    )
-                )
-
-                self.state.add_ssh_alias = self.query_one(
-                    "#ssh-alias-toggle", Checkbox
-                ).value
             elif step == "hermes":
                 self.state.hermes_agent_version = self.query_one(
                     "#hermes-version-input", Input
@@ -1099,17 +874,6 @@ class ConfigureTUI(App[list[tuple[str, str, str]] | None]):
                     )
                 else:
                     self.state.hermes_api_key_replace = False
-            elif step == "telegram":
-                token_present = self.orchestrator.telegram_token_present()
-                self.state.telegram_bot_token_input = self.query_one(
-                    "#telegram-token-input", Input
-                ).value.strip()
-                self.state.telegram_bot_token_replace = (not token_present) or bool(
-                    self.state.telegram_bot_token_input
-                )
-                self.state.telegram_allowlist_ids = self.query_one(
-                    "#telegram-allowlist-input", Input
-                ).value.strip()
         except Exception as exc:
             self.query_one("#error", Static).update(str(exc))
             return False
@@ -1117,14 +881,13 @@ class ConfigureTUI(App[list[tuple[str, str, str]] | None]):
 
     def _step_errors(self) -> dict[str, str]:
         key = self.steps[self.current_step].key
+        controller = self._step_registry.get(key)
+        if controller is not None:
+            return controller.validate()
         if key == "cloud":
             return self.state.validate_cloud()
-        if key == "server":
-            return self.state.validate_server()
         if key == "hermes":
             return self.state.validate_hermes()
-        if key == "telegram":
-            return self.state.validate_telegram()
         return {}
 
     def _apply_and_exit(self) -> None:
@@ -1221,7 +984,7 @@ class ConfigureTUI(App[list[tuple[str, str, str]] | None]):
 
     @on(CloudLoaded)
     def _cloud_loaded(self, message: CloudLoaded) -> None:
-        if message.request_id != self._active_cloud_request_id:
+        if not self._cloud_task.is_current(message.request_id):
             return
 
         self._cloud_loading = False
@@ -1321,6 +1084,8 @@ class ConfigureTUI(App[list[tuple[str, str, str]] | None]):
 
     @on(HermesApiKeyValidated)
     def _hermes_api_key_validated(self, message: HermesApiKeyValidated) -> None:
+        if not self._hermes_api_key_task.is_current(message.request_id):
+            return
         self._hermes_api_key_validating = False
         self._refresh_next_button_state()
         if message.error:
@@ -1339,11 +1104,12 @@ class ConfigureTUI(App[list[tuple[str, str, str]] | None]):
             except ConfigureServiceError as exc:
                 self.query_one("#error", Static).update(str(exc))
                 return
-            self.step_complete[self.current_step] = True
-            self.current_step += 1
+            self._advance_and_render()
 
     @on(TelegramValidated)
     def _telegram_validated(self, message: TelegramValidated) -> None:
+        if not self._telegram_task.is_current(message.request_id):
+            return
         self._telegram_loading = False
         self._refresh_next_button_state()
         if message.error:
@@ -1371,34 +1137,36 @@ class ConfigureTUI(App[list[tuple[str, str, str]] | None]):
             self.post_message(HermesOAuthFinished(success=False, output=str(exc)))
 
     def _validate_hermes_api_key_step(self) -> None:
+        request_id = self._hermes_api_key_task.begin()
         self._hermes_api_key_validating = True
         self._refresh_next_button_state()
         self.query_one("#status", Static).update("Validating Hermes API key...")
-        self._validate_hermes_api_key_step_worker()
+        self._validate_hermes_api_key_step_worker(request_id)
 
     @work(thread=True, exclusive=True)
-    def _validate_hermes_api_key_step_worker(self) -> None:
+    def _validate_hermes_api_key_step_worker(self, request_id: int) -> None:
         try:
             status = self.orchestrator.validate_hermes_api_key_setup(self.state)
-            self.post_message(HermesApiKeyValidated(status=status))
+            self.post_message(HermesApiKeyValidated(status=status, request_id=request_id))
         except Exception as exc:
-            self.post_message(HermesApiKeyValidated(error=str(exc)))
+            self.post_message(HermesApiKeyValidated(error=str(exc), request_id=request_id))
 
     def _validate_telegram_step(self) -> None:
+        request_id = self._telegram_task.begin()
         self._telegram_loading = True
         self._refresh_next_button_state()
         self.query_one("#status", Static).update(
             "Validating Telegram token and allowlist..."
         )
-        self._validate_telegram_step_worker()
+        self._validate_telegram_step_worker(request_id)
 
     @work(thread=True, exclusive=True)
-    def _validate_telegram_step_worker(self) -> None:
+    def _validate_telegram_step_worker(self, request_id: int) -> None:
         try:
             status = self.orchestrator.validate_telegram_setup(self.state)
-            self.post_message(TelegramValidated(status=status))
+            self.post_message(TelegramValidated(status=status, request_id=request_id))
         except Exception as exc:
-            self.post_message(TelegramValidated(error=str(exc)))
+            self.post_message(TelegramValidated(error=str(exc), request_id=request_id))
 
     def _load_cloud_options(
         self,
@@ -1406,9 +1174,7 @@ class ConfigureTUI(App[list[tuple[str, str, str]] | None]):
         quiet: bool = False,
         validate_for_next: bool = False,
     ) -> None:
-        self._cloud_request_seq += 1
-        request_id = self._cloud_request_seq
-        self._active_cloud_request_id = request_id
+        request_id = self._cloud_task.begin()
         self._pending_cloud_validation_next = validate_for_next
         self._pending_cloud_validation_request_id = request_id if validate_for_next else None
 

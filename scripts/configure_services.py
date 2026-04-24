@@ -20,6 +20,18 @@ from scripts.configure_state import LabeledValue, WizardState
 _SECRET_PLACEHOLDER = "***"
 
 
+APPLY_EFFECT_ORDER: tuple[str, ...] = (
+    "persist_cloud",
+    "persist_server",
+    "persist_hermes",
+    "persist_telegram",
+    "stage_extras",
+    "ensure_ssh_key",
+    "reconcile_ssh_alias",
+    "flush_env",
+)
+
+
 @dataclass(frozen=True)
 class CommandResult:
     stdout: str
@@ -90,10 +102,35 @@ class EnvStore:
         return {key: self.get(key) for key in keys}
 
     def flush(self) -> None:
+        if not self._staged:
+            return
+        # Build the new file contents in memory then commit atomically via
+        # temp + os.replace, so a crash cannot leave a half-written .env.
+        content = self.env_file.read_text() if self.env_file.exists() else ""
         for key, value in self._staged.items():
-            logic.set_env_value(self.env_file, key, value)
+            content = self._upsert_env_line(content, key, value)
+
+        tmp_path = self.env_file.with_name(self.env_file.name + ".tmp")
+        try:
+            tmp_path.write_text(content)
+            tmp_path.chmod(0o600)
+            os.replace(str(tmp_path), str(self.env_file))
+        except Exception:
+            if tmp_path.exists():
+                tmp_path.unlink()
+            raise
         self._staged.clear()
         self.env_file.chmod(0o600)
+
+    @staticmethod
+    def _upsert_env_line(content: str, key: str, value: str) -> str:
+        line = f"{key}={value}"
+        pattern = re.compile(rf"^{re.escape(key)}=.*$", re.MULTILINE)
+        if pattern.search(content):
+            return pattern.sub(line, content, count=1)
+        if content and not content.endswith("\n"):
+            content += "\n"
+        return content + line + "\n"
 
 
 class ProviderService:
@@ -736,32 +773,45 @@ class ConfigureOrchestrator:
             self.env.set("TELEGRAM_BOT_TOKEN", state.telegram_bot_token_input)
 
     def apply(self, state: WizardState) -> list[tuple[str, str, str]]:
-        self.persist_cloud_step(state)
-        self.persist_server_step(state)
-        self.persist_hermes_step(state)
-        self.persist_telegram_step(state)
-        self.env.set("HERMES_AGENT_VERSION", state.hermes_agent_version)
-        self.env.set("TF_VAR_hermes_provider", state.hermes_provider)
-        self.env.set("TF_VAR_hermes_model", state.hermes_model)
-
-        ssh_private_path, public_key = self.ensure_ssh_key_material(state.ssh_private_key_path)
-        state.ssh_private_key_path = ssh_private_path
-        self.env.set("BOOTSTRAP_SSH_PRIVATE_KEY_PATH", ssh_private_path)
-        self.env.set("TF_VAR_admin_ssh_public_key", f'"{public_key}"')
-
-        if self._should_reconcile_ssh_alias(state):
-            if state.add_ssh_alias:
-                self.ensure_repo_ssh_alias(
-                    state.admin_username,
-                    state.ssh_private_key_path,
-                    "22",
-                    state.hostname,
-                )
-            else:
-                self.remove_repo_ssh_alias()
-
-        self.env.flush()
+        for effect in APPLY_EFFECT_ORDER:
+            self._run_apply_effect(effect, state)
         return state.recap_rows()
+
+    def _run_apply_effect(self, effect: str, state: WizardState) -> None:
+        if effect == "persist_cloud":
+            self.persist_cloud_step(state)
+        elif effect == "persist_server":
+            self.persist_server_step(state)
+        elif effect == "persist_hermes":
+            self.persist_hermes_step(state)
+        elif effect == "persist_telegram":
+            self.persist_telegram_step(state)
+        elif effect == "stage_extras":
+            self.env.set("HERMES_AGENT_VERSION", state.hermes_agent_version)
+            self.env.set("TF_VAR_hermes_provider", state.hermes_provider)
+            self.env.set("TF_VAR_hermes_model", state.hermes_model)
+        elif effect == "ensure_ssh_key":
+            ssh_private_path, public_key = self.ensure_ssh_key_material(
+                state.ssh_private_key_path
+            )
+            state.ssh_private_key_path = ssh_private_path
+            self.env.set("BOOTSTRAP_SSH_PRIVATE_KEY_PATH", ssh_private_path)
+            self.env.set("TF_VAR_admin_ssh_public_key", f'"{public_key}"')
+        elif effect == "reconcile_ssh_alias":
+            if self._should_reconcile_ssh_alias(state):
+                if state.add_ssh_alias:
+                    self.ensure_repo_ssh_alias(
+                        state.admin_username,
+                        state.ssh_private_key_path,
+                        "22",
+                        state.hostname,
+                    )
+                else:
+                    self.remove_repo_ssh_alias()
+        elif effect == "flush_env":
+            self.env.flush()
+        else:
+            raise ConfigureServiceError(f"unknown apply effect: {effect}")
 
     def _desired_ssh_alias_state(self, state: WizardState) -> str:
         return "active" if state.add_ssh_alias else "inactive"
