@@ -20,6 +20,41 @@ Debian 13 uses nftables natively. Choosing nftables removes an extra abstraction
 - `templates/`: deterministic config templates copied to system paths.
 - `flake.nix`: Nix dev environment containing OpenTofu, Just, SSH tooling.
 - `scripts/toolchain.sh`: runs commands through `nix develop`; falls back to Docker+Nix when host nix is unavailable.
+- `scripts/configure_tui.py`: Textual full-screen configuration wizard.
+- `scripts/configure_services.py`: provider/Hermes lookup + .env orchestration service layer.
+- `scripts/configure_state.py`: typed wizard state model + validation.
+- `scripts/toolchain_guard.py`: fail-fast runtime isolation gate (rejects host Python).
+
+## Configure TUI architecture (Python + Textual)
+- UI layer: `scripts/configure_tui.py`
+  - Full-screen step wizard (Cloud → Server → Hermes → Telegram → Review)
+  - Keyboard-first flow: Tab/Shift+Tab, Enter next/apply, Ctrl+B back, Esc cancel
+  - Non-blocking metadata lookups via Textual workers
+- Pure logic/state: `scripts/configure_state.py` + existing `scripts/configure_logic.py`
+  - deterministic validators, mapping helpers, recap rows
+- Service layer: `scripts/configure_services.py`
+  - provider region/type lookups, Hermes metadata/auth discovery, env read/write, SSH key/alias ops
+
+Post-exit recap is printed after Textual exits, so summary remains in terminal history.
+
+## Toolchain-isolated run/debug/test
+All Python execution must go through `scripts/toolchain.sh`.
+
+Run wizard:
+```bash
+./scripts/toolchain.sh "python3 -m scripts.configure_tui"
+```
+
+Run tests:
+```bash
+./scripts/toolchain.sh "python3 -m unittest -v tests/test_configure_logic.py tests/test_toolchain_guard.py tests/test_justfile_configure.py tests/test_configure_tui.py"
+```
+
+Debug runtime isolation:
+```bash
+./scripts/toolchain.sh "python3 -c 'import sys; print(sys.executable)'"
+./scripts/toolchain.sh "python3 -c 'from scripts.toolchain_guard import ensure_expected_toolchain_runtime; ensure_expected_toolchain_runtime(); print(\"toolchain-runtime-ok\")'"
+```
 
 ## Prerequisites
 On your local workstation:

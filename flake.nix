@@ -24,6 +24,11 @@
           config.allowUnfree = true;
         };
         hermesPkg = hermes-agent.packages.${system}.default;
+        pythonEnv = pkgs.python3.withPackages (
+          ps: with ps; [
+            textual
+          ]
+        );
       in
       {
         devShells.default = pkgs.mkShell {
@@ -43,6 +48,7 @@
             hcloud
             linode-cli
             hermesPkg
+            pythonEnv
           ];
         };
       }

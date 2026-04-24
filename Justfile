@@ -9,34 +9,10 @@ set quiet := true
 
 PROVIDER := env("TF_VAR_cloud_provider", "")
 
+# Show recipe list with descriptions
 @default:
-    @printf '%s\n' \
-      'hermes-vps Just targets' \
-      '' \
-      'Core:' \
-      '  just configure' \
-      '  just init [PROVIDER=linode]' \
-      '  just init-upgrade [PROVIDER=linode]' \
-      '  just plan [PROVIDER=linode]' \
-      '  just apply [PROVIDER=linode]' \
-      '  just destroy CONFIRM=YES [PROVIDER=linode]' \
-      '  just bootstrap [PROVIDER=linode]' \
-      '  just verify [PROVIDER=linode]' \
-      '  just logs [PROVIDER=linode] [SERVICE=all|hermes|telegram-gateway|ssh|fail2ban|nftables]' \
-      '  just hardening-audit [PROVIDER=linode]' \
-      '' \
-      'Aliases:' \
-      '  just up [PROVIDER=linode]                    # init + plan + apply' \
-      '  just down CONFIRM=YES [PROVIDER=linode]     # destroy' \
-      '  just check [PROVIDER=linode]                 # verify' \
-      '  just audit [PROVIDER=linode]                 # hardening-audit' \
-      '' \
-      'Example flows:' \
-      '  first run: just init && just plan' \
-      '  deploy:    just apply && just bootstrap' \
-      '  verify:    just verify && just hardening-audit' \
-      '  teardown:  just destroy CONFIRM=YES'
-
+    @just --list
+# Validate provider selection, .env safety, and provider directory prerequisites
 @_preflight PROVIDER_ARG="":
     @set -euo pipefail; \
     P='{{ PROVIDER }}'; \
@@ -69,10 +45,12 @@ PROVIDER := env("TF_VAR_cloud_provider", "")
       exit 1; \
     fi
 
+# Interactive onboarding: cloud, server, Hermes, Telegram, and optional SSH alias
 configure:
     @set -euo pipefail; \
-    TOOLCHAIN_QUIET=1 ./scripts/toolchain.sh "CONFIGURE_ALT_SCREEN=1 ./scripts/configure.sh"
+    TOOLCHAIN_QUIET=1 ./scripts/toolchain.sh "python3 -m scripts.configure_tui"
 
+# Initialize OpenTofu in the selected provider directory
 init PROVIDER_ARG="": (_preflight PROVIDER_ARG)
     @set -euo pipefail; \
     P='{{ PROVIDER }}'; \
@@ -81,6 +59,7 @@ init PROVIDER_ARG="": (_preflight PROVIDER_ARG)
     TF_DIR="opentofu/providers/${P}"; \
     ./scripts/toolchain.sh "TF_VAR_cloud_provider=${P} tofu -chdir=${TF_DIR} init"
 
+# Initialize OpenTofu and upgrade provider/module plugins
 init-upgrade PROVIDER_ARG="": (_preflight PROVIDER_ARG)
     @set -euo pipefail; \
     P='{{ PROVIDER }}'; \
@@ -89,6 +68,7 @@ init-upgrade PROVIDER_ARG="": (_preflight PROVIDER_ARG)
     TF_DIR="opentofu/providers/${P}"; \
     ./scripts/toolchain.sh "TF_VAR_cloud_provider=${P} tofu -chdir=${TF_DIR} init -upgrade"
 
+# Create and save OpenTofu execution plan (tofuplan)
 plan PROVIDER_ARG="": (_preflight PROVIDER_ARG)
     @set -euo pipefail; \
     P='{{ PROVIDER }}'; \
@@ -97,6 +77,7 @@ plan PROVIDER_ARG="": (_preflight PROVIDER_ARG)
     TF_DIR="opentofu/providers/${P}"; \
     ./scripts/toolchain.sh "TF_VAR_cloud_provider=${P} tofu -chdir=${TF_DIR} plan -out=tofuplan"
 
+# Apply tofuplan (regenerates plan automatically when stale/missing)
 apply PROVIDER_ARG="": (_preflight PROVIDER_ARG)
     @set -euo pipefail; \
     P='{{ PROVIDER }}'; \
@@ -127,6 +108,7 @@ apply PROVIDER_ARG="": (_preflight PROVIDER_ARG)
     SERVER_IP=$(./scripts/toolchain.sh "TF_VAR_cloud_provider=${P} tofu -chdir=${TF_DIR} output -raw public_ipv4"); \
     ./scripts/update_ssh_alias.sh .ssh/config hermes-vps "${SERVER_IP}"
 
+# Destroy managed infrastructure (requires CONFIRM=YES)
 destroy CONFIRM="NO" PROVIDER_ARG="": (_preflight PROVIDER_ARG)
     @set -euo pipefail; \
     C='{{ CONFIRM }}'; \
@@ -157,6 +139,7 @@ destroy CONFIRM="NO" PROVIDER_ARG="": (_preflight PROVIDER_ARG)
     fi; \
     ./scripts/toolchain.sh "TF_VAR_cloud_provider=${P} tofu -chdir=${TF_DIR} destroy"
 
+# Run post-provision bootstrap scripts over SSH
 bootstrap PROVIDER_ARG="": (_preflight PROVIDER_ARG)
     @set -euo pipefail; \
     P='{{ PROVIDER }}'; \
@@ -262,6 +245,7 @@ bootstrap PROVIDER_ARG="": (_preflight PROVIDER_ARG)
         find /root/hermes-vps-stage/bootstrap/runtime -maxdepth 1 -type f \( -name \"*.env\" -o -name \"hermes-auth.json\" \) -exec shred -u {} + 2>/dev/null || true; \
         rm -rf /root/hermes-vps-stage/bootstrap/runtime'"
 
+# Run remote verification checks on the provisioned server
 verify PROVIDER_ARG="": (_preflight PROVIDER_ARG)
     @set -euo pipefail; \
     P='{{ PROVIDER }}'; \
@@ -284,6 +268,7 @@ verify PROVIDER_ARG="": (_preflight PROVIDER_ARG)
     fi; \
     ssh -i "${KEY_PATH}" -p "${SSH_PORT}" -o StrictHostKeyChecking=accept-new "${ADMIN_USER}@${SERVER_IP}" "sudo bash /root/hermes-vps-stage/bootstrap/90-verify.sh"
 
+# Show recent journal logs from one service or all core services
 logs SERVICE="all" PROVIDER_ARG="": (_preflight PROVIDER_ARG)
     @set -euo pipefail; \
     P='{{ PROVIDER }}'; \
@@ -318,6 +303,7 @@ logs SERVICE="all" PROVIDER_ARG="": (_preflight PROVIDER_ARG)
         "sudo journalctl -u ${SVC} --no-pager -n 200"; \
     fi
 
+# Run security hardening audit commands over SSH
 hardening-audit PROVIDER_ARG="": (_preflight PROVIDER_ARG)
     @set -euo pipefail; \
     P='{{ PROVIDER }}'; \
@@ -341,20 +327,19 @@ hardening-audit PROVIDER_ARG="": (_preflight PROVIDER_ARG)
     ssh -i "${KEY_PATH}" -p "${SSH_PORT}" -o StrictHostKeyChecking=accept-new "${ADMIN_USER}@${SERVER_IP}" \
       "sudo sshd -t && sudo nft list ruleset && sudo fail2ban-client status && sudo sysctl -n net.ipv4.tcp_syncookies >/dev/null"
 
+# Convenience alias: init + plan + apply
 up PROVIDER_ARG="":
     @set -euo pipefail; \
     PROVIDER='{{ PROVIDER }}' just init '{{ PROVIDER_ARG }}'; \
     PROVIDER='{{ PROVIDER }}' just plan '{{ PROVIDER_ARG }}'; \
     PROVIDER='{{ PROVIDER }}' just apply '{{ PROVIDER_ARG }}'
 
-check PROVIDER_ARG="":
+# Comprehensive deployment pipeline: infra + bootstrap + validation + hardening checks
+deploy PROVIDER_ARG="":
     @set -euo pipefail; \
-    PROVIDER='{{ PROVIDER }}' just verify '{{ PROVIDER_ARG }}'
-
-audit PROVIDER_ARG="":
-    @set -euo pipefail; \
+    PROVIDER='{{ PROVIDER }}' just init '{{ PROVIDER_ARG }}'; \
+    PROVIDER='{{ PROVIDER }}' just plan '{{ PROVIDER_ARG }}'; \
+    PROVIDER='{{ PROVIDER }}' just apply '{{ PROVIDER_ARG }}'; \
+    PROVIDER='{{ PROVIDER }}' just bootstrap '{{ PROVIDER_ARG }}'; \
+    PROVIDER='{{ PROVIDER }}' just verify '{{ PROVIDER_ARG }}'; \
     PROVIDER='{{ PROVIDER }}' just hardening-audit '{{ PROVIDER_ARG }}'
-
-down CONFIRM="NO" PROVIDER_ARG="":
-    @set -euo pipefail; \
-    PROVIDER='{{ PROVIDER }}' just destroy CONFIRM='{{ CONFIRM }}' '{{ PROVIDER_ARG }}'
