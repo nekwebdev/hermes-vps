@@ -109,6 +109,61 @@ class TelegramStaleResultTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(orchestrator.telegram_persisted)
 
 
+class HermesMetadataCorrelationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_hermes_metadata_with_stale_request_id_is_dropped(self) -> None:
+        app = _make_app()
+        async with app.run_test(size=(120, 40)) as pilot:
+            app.current_step = 2
+            await pilot.pause()
+
+            baseline_models = list(app.hermes_model_options)
+
+            app.state.hermes_provider = "anthropic"
+            app._pending_hermes_provider = "anthropic"
+            app._hermes_loading = True
+            app._hermes_metadata_task.force_active(7)
+            app.post_message(
+                HermesLoaded(
+                    providers=["openai-codex", "anthropic"],
+                    models=["claude-sonnet-4"],
+                    resolved_provider="openai-codex",
+                    auth_type="api_key",
+                    auth_env_vars=["HERMES_API_KEY"],
+                    request_id=6,
+                )
+            )
+            await pilot.pause()
+
+            self.assertTrue(app._hermes_loading)
+            self.assertEqual(app.state.hermes_provider, "anthropic")
+            self.assertEqual(app.hermes_model_options, baseline_models)
+
+    async def test_hermes_metadata_with_current_request_id_updates_state(self) -> None:
+        app = _make_app()
+        async with app.run_test(size=(120, 40)) as pilot:
+            app.current_step = 2
+            await pilot.pause()
+
+            request_id = app._hermes_metadata_task.begin()
+            app._hermes_loading = True
+            app.post_message(
+                HermesLoaded(
+                    providers=["openai-codex", "anthropic"],
+                    models=["gpt-5.4-mini"],
+                    resolved_provider="openai-codex",
+                    auth_type="api_key",
+                    auth_env_vars=["HERMES_API_KEY"],
+                    request_id=request_id,
+                )
+            )
+            await pilot.pause()
+
+            self.assertFalse(app._hermes_loading)
+            self.assertEqual(app.state.hermes_provider, "openai-codex")
+            self.assertEqual(app.state.hermes_auth_type, "api_key")
+            self.assertIn("gpt-5.4-mini", app.hermes_model_options)
+
+
 class WorkerErrorUnlockTests(unittest.IsolatedAsyncioTestCase):
     async def test_next_button_reenabled_after_telegram_validation_error(self) -> None:
         app = _make_app()

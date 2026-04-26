@@ -86,6 +86,7 @@ class HermesLoaded(Message):
         resolved_provider: str,
         auth_type: str,
         auth_env_vars: list[str],
+        request_id: int = 0,
         error: str = "",
     ) -> None:
         super().__init__()
@@ -94,6 +95,7 @@ class HermesLoaded(Message):
         self.resolved_provider = resolved_provider
         self.auth_type = auth_type
         self.auth_env_vars = auth_env_vars
+        self.request_id = request_id
         self.error = error
 
 
@@ -193,6 +195,7 @@ class ConfigureTUI(App[list[tuple[str, str, str]] | None]):
         self._pending_telegram_validation_next = False
         self._pending_cloud_validation_request_id: int | None = None
         self._cloud_task = CorrelatedTask()
+        self._hermes_metadata_task = CorrelatedTask()
         self._telegram_task = CorrelatedTask()
         self._hermes_api_key_task = CorrelatedTask()
         self._hermes_api_key_validating = False
@@ -1015,6 +1018,8 @@ class ConfigureTUI(App[list[tuple[str, str, str]] | None]):
 
     @on(HermesLoaded)
     def _hermes_loaded(self, message: HermesLoaded) -> None:
+        if message.request_id and not self._hermes_metadata_task.is_current(message.request_id):
+            return
         self._hermes_loading = False
         self._refresh_next_button_state()
         if message.error:
@@ -1262,12 +1267,13 @@ class ConfigureTUI(App[list[tuple[str, str, str]] | None]):
         self._hermes_loading = True
         self._refresh_next_button_state()
         self._pending_hermes_provider = None
+        request_id = self._hermes_metadata_task.begin()
         if self.steps[self.current_step].key == "hermes":
             self.query_one("#status", Static).update("Loading Hermes metadata...")
-        self._load_hermes_worker(request_provider, models_only)
+        self._load_hermes_worker(request_provider, models_only, request_id)
 
     @work(thread=True, exclusive=True)
-    def _load_hermes_worker(self, provider: str, models_only: bool) -> None:
+    def _load_hermes_worker(self, provider: str, models_only: bool, request_id: int) -> None:
         try:
             providers = self.hermes_provider_options
             if not models_only or not providers:
@@ -1286,10 +1292,10 @@ class ConfigureTUI(App[list[tuple[str, str, str]] | None]):
                 seed_provider
             )
             self.post_message(
-                HermesLoaded(providers, models, seed_provider, auth_type, env_vars)
+                HermesLoaded(providers, models, seed_provider, auth_type, env_vars, request_id=request_id)
             )
         except Exception as exc:
-            self.post_message(HermesLoaded([], [], provider, "api_key", [], str(exc)))
+            self.post_message(HermesLoaded([], [], provider, "api_key", [], request_id=request_id, error=str(exc)))
 
 
 def run_configure_app(root_dir: pathlib.Path) -> list[tuple[str, str, str]] | None:
