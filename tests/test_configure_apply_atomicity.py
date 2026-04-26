@@ -110,6 +110,23 @@ class EnvFlushAtomicityTests(unittest.TestCase):
         leftovers = [p.name for p in self.fixture.tmpdir.iterdir() if p.name.endswith(".tmp")]
         self.assertEqual(leftovers, [])
 
+    def test_env_flush_clears_staged_values_after_success(self) -> None:
+        self.store.set("HCLOUD_TOKEN", "fresh-token")
+        self.store.flush()
+        self.assertEqual(self.store._staged, {})
+
+        captured: list[tuple[str, str]] = []
+        real_replace = os.replace
+
+        def spy_replace(src, dst):  # type: ignore[no-untyped-def]
+            captured.append((str(src), str(dst)))
+            real_replace(src, dst)
+
+        with patch("scripts.configure_services.os.replace", spy_replace):
+            self.store.flush()
+
+        self.assertEqual(captured, [])
+
 
 class ApplyPartialCommitTests(unittest.TestCase):
     def setUp(self) -> None:

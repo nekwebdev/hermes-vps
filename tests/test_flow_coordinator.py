@@ -97,6 +97,13 @@ class FlowCoordinatorJumpTests(unittest.TestCase):
         coord.jump_to(2)
         self.assertEqual(coord.current_step, 2)
 
+    def test_jump_to_keeps_existing_completion_state(self) -> None:
+        coord = FlowCoordinator(step_count=5)
+        coord.advance()
+        coord.jump_to(3)
+        self.assertEqual(coord.current_step, 3)
+        self.assertTrue(coord.step_complete[0])
+
 
 class FlowCoordinatorCompletionViewTests(unittest.TestCase):
     def test_step_complete_property_returns_snapshot_copy(self) -> None:
