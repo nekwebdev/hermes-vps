@@ -38,6 +38,12 @@ class CommandResult:
     stderr: str
 
 
+@dataclass(frozen=True)
+class ApplyPlan:
+    state: WizardState
+    effects: tuple[str, ...]
+
+
 class ConfigureServiceError(RuntimeError):
     pass
 
@@ -772,10 +778,16 @@ class ConfigureOrchestrator:
         if state.telegram_bot_token_replace or not self.telegram_token_present():
             self.env.set("TELEGRAM_BOT_TOKEN", state.telegram_bot_token_input)
 
+    def build_apply_plan(self, state: WizardState) -> ApplyPlan:
+        return ApplyPlan(state=state, effects=APPLY_EFFECT_ORDER)
+
+    def execute_apply_plan(self, plan: ApplyPlan) -> list[tuple[str, str, str]]:
+        for effect in plan.effects:
+            self._run_apply_effect(effect, plan.state)
+        return plan.state.recap_rows()
+
     def apply(self, state: WizardState) -> list[tuple[str, str, str]]:
-        for effect in APPLY_EFFECT_ORDER:
-            self._run_apply_effect(effect, state)
-        return state.recap_rows()
+        return self.execute_apply_plan(self.build_apply_plan(state))
 
     def _run_apply_effect(self, effect: str, state: WizardState) -> None:
         if effect == "persist_cloud":
