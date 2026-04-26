@@ -127,6 +127,29 @@ class EnvFlushAtomicityTests(unittest.TestCase):
 
         self.assertEqual(captured, [])
 
+    def test_env_flush_fsyncs_temp_file_before_replace(self) -> None:
+        self.store.set("HCLOUD_TOKEN", "durable-token")
+        events: list[str] = []
+        real_fsync = os.fsync
+        real_replace = os.replace
+
+        def spy_fsync(fd):  # type: ignore[no-untyped-def]
+            events.append("fsync")
+            return real_fsync(fd)
+
+        def spy_replace(src, dst):  # type: ignore[no-untyped-def]
+            events.append("replace")
+            return real_replace(src, dst)
+
+        with patch("scripts.configure_services.os.fsync", spy_fsync), patch(
+            "scripts.configure_services.os.replace", spy_replace
+        ):
+            self.store.flush()
+
+        self.assertIn("fsync", events)
+        self.assertIn("replace", events)
+        self.assertLess(events.index("fsync"), events.index("replace"))
+
 
 class ApplyPartialCommitTests(unittest.TestCase):
     def setUp(self) -> None:

@@ -118,7 +118,10 @@ class EnvStore:
 
         tmp_path = self.env_file.with_name(self.env_file.name + ".tmp")
         try:
-            tmp_path.write_text(content)
+            with tmp_path.open("w", encoding="utf-8") as tmp_file:
+                tmp_file.write(content)
+                tmp_file.flush()
+                os.fsync(tmp_file.fileno())
             tmp_path.chmod(0o600)
             os.replace(str(tmp_path), str(self.env_file))
         except Exception:
