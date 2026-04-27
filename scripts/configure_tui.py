@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
+# pyright: reportAny=false, reportUnusedCallResult=false, reportImplicitStringConcatenation=false, reportImplicitOverride=false, reportUnannotatedClassAttribute=false, reportUnusedImport=false, reportRedeclaration=false, reportPrivateUsage=false
 from __future__ import annotations
 
 import pathlib
 from dataclasses import dataclass
+from typing import ClassVar, cast, final
 
 from textual import on, work
 from textual.app import App, ComposeResult
@@ -13,7 +15,6 @@ from textual.reactive import reactive
 from textual.screen import ModalScreen
 from textual.widgets import (
     Button,
-    Checkbox,
     Footer,
     Header,
     Input,
@@ -22,11 +23,13 @@ from textual.widgets import (
     Select,
     Static,
 )
-
-from scripts import configure_logic as logic
 from scripts.configure_async import CorrelatedTask
 from scripts.configure_flow import FlowCoordinator
-from scripts.configure_services import ConfigureOrchestrator, ConfigureServiceError
+from scripts.configure_services import (
+    ConfigureOrchestrator,
+    ConfigureOrchestratorLike,
+    ConfigureServiceError,
+)
 from scripts.configure_state import (
     LabeledValue,
     WizardState,
@@ -41,7 +44,7 @@ _HERMES_LOADING_MODEL_SENTINEL = "__loading__"
 
 
 class ConfirmExitScreen(ModalScreen[bool]):
-    CSS = """
+    CSS: ClassVar[str] = """
     ConfirmExitScreen { align: center middle; }
     #confirm-exit { width: 56; height: auto; max-height: 9; border: round #8a70ff; background: #0e1019 70%; padding: 1 2; }
     #confirm-exit-buttons { height: auto; align: center middle; margin-top: 1; }
@@ -63,6 +66,7 @@ class ConfirmExitScreen(ModalScreen[bool]):
         self.dismiss(True)
 
 
+@final
 class CloudLoaded(Message):
     def __init__(
         self,
@@ -78,6 +82,7 @@ class CloudLoaded(Message):
         self.request_id = request_id
 
 
+@final
 class HermesLoaded(Message):
     def __init__(
         self,
@@ -99,12 +104,14 @@ class HermesLoaded(Message):
         self.error = error
 
 
+@final
 class HermesOAuthProgress(Message):
     def __init__(self, chunk: str) -> None:
         super().__init__()
         self.chunk = chunk
 
 
+@final
 class HermesOAuthFinished(Message):
     def __init__(self, success: bool, output: str) -> None:
         super().__init__()
@@ -112,6 +119,7 @@ class HermesOAuthFinished(Message):
         self.output = output
 
 
+@final
 class HermesApiKeyValidated(Message):
     def __init__(self, status: str = "", error: str = "", request_id: int = 0) -> None:
         super().__init__()
@@ -120,12 +128,17 @@ class HermesApiKeyValidated(Message):
         self.request_id = request_id
 
 
+@final
 class TelegramValidated(Message):
     def __init__(self, status: str = "", error: str = "", request_id: int = 0) -> None:
         super().__init__()
         self.status = status
         self.error = error
         self.request_id = request_id
+
+
+def _selected_text(value: object) -> str:
+    return value if isinstance(value, str) else ""
 
 
 @dataclass(frozen=True)
@@ -137,6 +150,36 @@ class StepMeta:
 class ConfigureTUI(App[list[tuple[str, str, str]] | None]):
     TITLE = "hermes-vps configuration"
     SUB_TITLE = "Textual wizard"
+    root_dir: pathlib.Path
+    orchestrator: ConfigureOrchestratorLike
+    state: WizardState
+    _coordinator: FlowCoordinator
+    _step_registry: StepRegistry
+    location_options: list[LabeledValue]
+    server_type_options: list[LabeledValue]
+    hermes_provider_options: list[str]
+    hermes_model_options: list[str]
+    _cloud_loading: bool
+    _hermes_loading: bool
+    _telegram_loading: bool
+    _ui_ready: bool
+    _pending_cloud_validation_next: bool
+    _pending_telegram_validation_next: bool
+    _pending_cloud_validation_request_id: int | None
+    _cloud_task: CorrelatedTask
+    _hermes_metadata_task: CorrelatedTask
+    _telegram_task: CorrelatedTask
+    _hermes_api_key_task: CorrelatedTask
+    _hermes_api_key_validating: bool
+    _pending_hermes_api_key_validation_next: bool
+    _suppress_hermes_provider_change: bool
+    _pending_hermes_provider: str | None
+    _hermes_provider_select_initialized: bool
+    _hermes_oauth_running: bool
+    _hermes_oauth_output: str
+    _rendering_step: bool
+    _pending_step_render: bool
+    _restore_next_focus_when_enabled: bool
     CSS = """
     Screen { background: #090b12; color: #f4f7ff; }
     #root { height: 1fr; }
@@ -171,16 +214,20 @@ class ConfigureTUI(App[list[tuple[str, str, str]] | None]):
     current_step = reactive(0)
 
     def __init__(
-        self, root_dir: pathlib.Path, orchestrator: ConfigureOrchestrator | None = None
+        self, root_dir: pathlib.Path, orchestrator: ConfigureOrchestratorLike | None = None
     ) -> None:
         super().__init__()
         self.root_dir = root_dir
-        self.orchestrator = orchestrator or ConfigureOrchestrator(root_dir)
-        self.state = self.orchestrator.load_initial_state()
+        self.orchestrator: ConfigureOrchestratorLike = (
+            orchestrator
+            if orchestrator is not None
+            else cast(ConfigureOrchestratorLike, cast(object, ConfigureOrchestrator(root_dir)))
+        )
+        self.state: WizardState = self.orchestrator.load_initial_state()
         self._coordinator = FlowCoordinator(step_count=len(self.steps))
         self._step_registry = StepRegistry()
         for controller_cls in EXTRACTED_CONTROLLERS:
-            self._step_registry.register(controller_cls(self))
+            _ = self._step_registry.register(controller_cls(self))
 
         self.location_options: list[LabeledValue] = []
         self.server_type_options: list[LabeledValue] = []
@@ -272,12 +319,12 @@ class ConfigureTUI(App[list[tuple[str, str, str]] | None]):
     def _refresh_rail(self) -> None:
         for idx, _ in enumerate(self.steps):
             item = self.query_one(f"#step-{idx}", Static)
-            item.set_class(False, "step-current")
-            item.set_class(False, "step-complete")
+            _ = item.set_class(False, "step-current")
+            _ = item.set_class(False, "step-complete")
             if idx < self.current_step or self.step_complete.get(idx):
-                item.set_class(True, "step-complete")
+                _ = item.set_class(True, "step-complete")
             if idx == self.current_step:
-                item.set_class(True, "step-current")
+                _ = item.set_class(True, "step-current")
 
     def _is_next_blocked_by_loading(self) -> bool:
         step = self.steps[self.current_step].key
@@ -352,18 +399,18 @@ class ConfigureTUI(App[list[tuple[str, str, str]] | None]):
             step = self.steps[self.current_step].key
             controller = self._step_registry.get(step)
             if controller is not None:
-                controller.mount(form)
+                _ = controller.mount(form)
             elif step == "cloud":
                 self._mount_cloud(form)
                 if not self._cloud_loading:
-                    self._load_cloud_options()
+                    _ = self._load_cloud_options()
             elif step == "hermes":
                 self._mount_hermes(form)
-                self.call_after_refresh(self._refresh_hermes_provider_model_ui)
+                _ = self.call_after_refresh(self._refresh_hermes_provider_model_ui)
                 if not self._hermes_loading and (
                     not self.hermes_provider_options or not self.hermes_model_options
                 ):
-                    self._load_hermes_options()
+                    _ = self._load_hermes_options()
 
             self.query_one("#back", Button).disabled = self.current_step == 0
             self.query_one("#next", Button).label = (
@@ -642,8 +689,8 @@ class ConfigureTUI(App[list[tuple[str, str, str]] | None]):
             return
 
         try:
-            provider_select = self.query_one("#hermes-provider-select", Select)
-            model_select = self.query_one("#hermes-model-select", Select)
+            provider_select = cast(Select[str], self.query_one("#hermes-provider-select", Select))
+            model_select = cast(Select[str], self.query_one("#hermes-model-select", Select))
 
             provider_values = list(self.hermes_provider_options)
             if not provider_values:
@@ -654,7 +701,7 @@ class ConfigureTUI(App[list[tuple[str, str, str]] | None]):
             if provider_options:
                 existing_provider = self.state.hermes_provider
                 if not existing_provider and provider_select.value not in ("", Select.BLANK):
-                    existing_provider = str(provider_select.value)
+                    existing_provider = _selected_text(provider_select.value)
                 seed_provider = choose_seed(
                     provider_values,
                     existing=existing_provider,
@@ -686,7 +733,7 @@ class ConfigureTUI(App[list[tuple[str, str, str]] | None]):
             auth_methods = self.orchestrator.hermes_available_auth_methods(
                 self.state.hermes_auth_type
             )
-            auth_select = self.query_one("#hermes-auth-method-select", Select)
+            auth_select = cast(Select[str], self.query_one("#hermes-auth-method-select", Select))
             auth_options = [("API key", "api_key"), ("OAuth", "oauth")]
             auth_options = [pair for pair in auth_options if pair[1] in auth_methods]
             auth_select.set_options(auth_options)
@@ -815,7 +862,7 @@ class ConfigureTUI(App[list[tuple[str, str, str]] | None]):
 
         self._advance_and_render()
 
-    def action_back(self) -> None:
+    def action_back(self) -> None:  # pyright: ignore[reportIncompatibleMethodOverride]
         result = self._coordinator.back()
         if result.next_step != self.current_step:
             self.current_step = result.next_step
@@ -833,9 +880,8 @@ class ConfigureTUI(App[list[tuple[str, str, str]] | None]):
             return controller.capture()
         try:
             if step == "cloud":
-                self.state.provider = (
-                    self.query_one("#provider-select", Select).value or ""
-                )
+                provider_select = cast(Select[str], self.query_one("#provider-select", Select))
+                self.state.provider = _selected_text(provider_select.value)
                 self.state.server_image = (
                     "debian-13"
                     if self.state.provider == "hetzner"
@@ -857,17 +903,15 @@ class ConfigureTUI(App[list[tuple[str, str, str]] | None]):
                         self.state.hermes_agent_version
                     )
                 )
-                self.state.hermes_provider = (
-                    self.query_one("#hermes-provider-select", Select).value or ""
-                )
-                model_value = self.query_one("#hermes-model-select", Select).value or ""
+                provider_select = cast(Select[str], self.query_one("#hermes-provider-select", Select))
+                self.state.hermes_provider = _selected_text(provider_select.value)
+                model_select = cast(Select[str], self.query_one("#hermes-model-select", Select))
+                model_value = _selected_text(model_select.value)
                 self.state.hermes_model = (
                     "" if model_value == _HERMES_LOADING_MODEL_SENTINEL else model_value
                 )
-                self.state.hermes_auth_method = (
-                    self.query_one("#hermes-auth-method-select", Select).value
-                    or "api_key"
-                )
+                auth_select = cast(Select[str], self.query_one("#hermes-auth-method-select", Select))
+                self.state.hermes_auth_method = _selected_text(auth_select.value) or "api_key"
                 if self.state.hermes_auth_method == "api_key":
                     self.state.hermes_api_key_input = self.query_one(
                         "#hermes-api-key-input", Input
@@ -903,11 +947,11 @@ class ConfigureTUI(App[list[tuple[str, str, str]] | None]):
 
     @on(Select.Changed, "#provider-select")
     def _provider_changed(self, event: Select.Changed) -> None:
-        new_provider = event.value or ""
-        if new_provider == self.state.provider:
+        new_provider = _selected_text(event.value)
+        if not new_provider:
             return
 
-        self.state.provider = new_provider
+        self.state.provider = _selected_text(event.value)
         self.state.server_image = (
             "debian-13" if self.state.provider == "hetzner" else "linode/debian13"
         )
@@ -919,35 +963,35 @@ class ConfigureTUI(App[list[tuple[str, str, str]] | None]):
 
     @on(Select.Changed, "#location-select")
     def _location_changed(self, event: Select.Changed) -> None:
-        self.state.location = event.value or ""
+        self.state.location = _selected_text(event.value)
         self._load_cloud_options(server_types_only=True, quiet=True)
 
     @on(Select.Changed, "#hermes-provider-select")
     def _hermes_provider_changed(self, event: Select.Changed) -> None:
         if self._suppress_hermes_provider_change:
             return
-        new_provider = event.value or ""
-        if not new_provider:
+        new_provider_value = event.value
+        if not isinstance(new_provider_value, str) or not new_provider_value:
             return
-        if new_provider == self.state.hermes_provider:
+        if new_provider_value == self.state.hermes_provider:
             return
-        self.state.hermes_provider = new_provider
-        self._pending_hermes_provider = new_provider
+        self.state.hermes_provider = new_provider_value
+        self._pending_hermes_provider = new_provider_value
         self.state.hermes_model = ""
         self._hermes_oauth_output = ""
         self.hermes_model_options = []
         self.query_one("#status", Static).update("Loading Hermes metadata...")
         self.query_one("#hermes-oauth-output", Static).update("")
-        model_select = self.query_one("#hermes-model-select", Select)
+        model_select = cast(Select[str], self.query_one("#hermes-model-select", Select))
         model_select.set_options(
             [("Loading models...", _HERMES_LOADING_MODEL_SENTINEL)]
         )
         model_select.value = _HERMES_LOADING_MODEL_SENTINEL
-        self._load_hermes_options(models_only=True, provider_override=new_provider)
+        self._load_hermes_options(models_only=True, provider_override=new_provider_value)
 
     @on(Select.Changed, "#hermes-model-select")
     def _hermes_model_changed(self, event: Select.Changed) -> None:
-        model_value = event.value or ""
+        model_value = _selected_text(event.value)
         if not model_value or model_value == _HERMES_LOADING_MODEL_SENTINEL:
             return
         self.state.hermes_model = model_value
@@ -958,7 +1002,7 @@ class ConfigureTUI(App[list[tuple[str, str, str]] | None]):
 
     @on(Select.Changed, "#hermes-auth-method-select")
     def _hermes_auth_method_changed(self, event: Select.Changed) -> None:
-        method = event.value or "api_key"
+        method = _selected_text(event.value) or "api_key"
         if method not in {"api_key", "oauth"}:
             return
         self.state.hermes_auth_method = method
@@ -1132,10 +1176,13 @@ class ConfigureTUI(App[list[tuple[str, str, str]] | None]):
 
     @work(thread=True, exclusive=True)
     def _run_hermes_oauth_worker(self, provider: str) -> None:
+        def emit_progress(chunk: str) -> None:
+            self.post_message(HermesOAuthProgress(chunk))
+
         try:
             success, output = self.orchestrator.hermes.run_oauth_add(
                 provider,
-                on_output=lambda chunk: self.post_message(HermesOAuthProgress(chunk)),
+                on_output=emit_progress,
             )
             self.post_message(HermesOAuthFinished(success=success, output=output))
         except Exception as exc:

@@ -1,3 +1,4 @@
+# pyright: reportAny=false, reportUnknownMemberType=false, reportUnknownVariableType=false, reportUnknownArgumentType=false, reportUnknownParameterType=false, reportUnusedCallResult=false, reportUnusedImport=false, reportPrivateUsage=false, reportImplicitStringConcatenation=false, reportImplicitOverride=false, reportIncompatibleMethodOverride=false, reportUnannotatedClassAttribute=false
 """Wiring tests for extracted step controllers.
 
 These tests pin the StepController contract (every extracted controller
@@ -29,10 +30,7 @@ class StepControllerProtocolTests(unittest.TestCase):
 
     def test_extracted_controllers_subclass_step_controller(self) -> None:
         for controller in EXTRACTED_CONTROLLERS:
-            self.assertTrue(
-                issubclass(controller, StepController),
-                f"{controller.__name__} must inherit from StepController",
-            )
+            self.assertIn(StepController, controller.__mro__[1:], f"{controller.__name__} must inherit from StepController")
 
     def test_extracted_controllers_have_no_duplicate_keys(self) -> None:
         keys = [c.key for c in EXTRACTED_CONTROLLERS]

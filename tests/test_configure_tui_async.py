@@ -14,6 +14,8 @@ or weaken what the wizard already does:
   user can retry without restarting the wizard.
 """
 
+# pyright: reportAttributeAccessIssue=false, reportPrivateUsage=false, reportUnusedCallResult=false
+
 from __future__ import annotations
 
 import pathlib
@@ -24,7 +26,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 
 from textual.widgets import Button, Static
 
-from test_configure_tui import _DeterministicConfigureTUI, _FakeOrchestrator
+from tests.test_configure_tui import _DeterministicConfigureTUI, _FakeOrchestrator
 
 from scripts.configure_tui import (
     CloudLoaded,

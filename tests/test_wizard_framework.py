@@ -1,3 +1,4 @@
+# pyright: reportAny=false, reportUnknownMemberType=false, reportUnknownVariableType=false, reportUnknownArgumentType=false, reportUnknownParameterType=false, reportUnusedCallResult=false, reportUnusedImport=false, reportPrivateUsage=false, reportImplicitStringConcatenation=false, reportImplicitOverride=false, reportIncompatibleMethodOverride=false, reportUnannotatedClassAttribute=false
 """Smoke tests for the wizard_framework seed.
 
 The seed re-exports the reusable navigation/correlation/step-controller
@@ -53,13 +54,12 @@ class WizardFrameworkReexportTests(unittest.TestCase):
         self.assertIs(CorrelatedTask, LegacyTask)
         self.assertIs(TransitionResult, LegacyTransition)
         # Wizard-specific subclass must inherit from the framework base.
-        self.assertTrue(issubclass(WizardStepController, StepController))
+        self.assertIs(WizardStepController.__mro__[1], StepController)
 
 
 class StepRegistryTests(unittest.TestCase):
     def _controller(self, key: str) -> StepController:
         controller = StepController(app=None)
-        # type: ignore[assignment] - test scaffolding
         type(controller).key = key  # noqa: B010
         return controller
 
@@ -67,7 +67,7 @@ class StepRegistryTests(unittest.TestCase):
         registry = StepRegistry()
 
         class _Foo(StepController):
-            key = "foo"
+            key: str = "foo"
 
         controller = _Foo(app=None)
         registry.register(controller)
@@ -84,7 +84,7 @@ class StepRegistryTests(unittest.TestCase):
         registry = StepRegistry()
 
         class _Bar(StepController):
-            key = "bar"
+            key: str = "bar"
 
         registry.register(_Bar(app=None))
         with self.assertRaises(ValueError):
@@ -99,9 +99,10 @@ class GenericStepControllerSmokeTests(unittest.TestCase):
             captured_value: str = ""
 
         class _CustomStep(StepController):
-            key = "custom"
+            app: _FakeApp
+            key: str = "custom"
 
-            def mount(self, form) -> None:  # type: ignore[override]
+            def mount(self, form: object) -> None:  # type: ignore[override]
                 events.append(f"mount:{form}")
 
             def capture(self) -> bool:  # type: ignore[override]

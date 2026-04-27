@@ -4,16 +4,12 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-24.11";
     flake-utils.url = "github:numtide/flake-utils";
-    hermes-agent = {
-      url = "github:NousResearch/hermes-agent";
-    };
   };
 
   outputs =
     {
       nixpkgs,
       flake-utils,
-      hermes-agent,
       ...
     }:
     flake-utils.lib.eachDefaultSystem (
@@ -23,7 +19,6 @@
           inherit system;
           config.allowUnfree = true;
         };
-        hermesPkg = hermes-agent.packages.${system}.default;
         pythonEnv = pkgs.python3.withPackages (
           ps: with ps; [
             textual
@@ -47,7 +42,7 @@
             gum
             hcloud
             linode-cli
-            hermesPkg
+            basedpyright
             pythonEnv
           ];
         };

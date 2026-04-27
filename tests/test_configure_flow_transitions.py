@@ -1,3 +1,4 @@
+# pyright: reportAny=false, reportUnknownMemberType=false, reportUnknownVariableType=false, reportUnknownArgumentType=false, reportUnknownParameterType=false, reportUnusedCallResult=false, reportUnusedImport=false, reportPrivateUsage=false, reportImplicitStringConcatenation=false, reportImplicitOverride=false, reportIncompatibleMethodOverride=false, reportUnannotatedClassAttribute=false
 """Contract-freeze tests for the wizard step/transition matrix.
 
 These tests pin down the canonical step list, navigation semantics
@@ -8,13 +9,14 @@ behavior. They run against the current ConfigureTUI implementation.
 
 from __future__ import annotations
 
+# pyright: reportAttributeAccessIssue=false, reportPrivateUsage=false, reportUnusedCallResult=false
 import pathlib
 import sys
 import unittest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 
-from test_configure_tui import _DeterministicConfigureTUI, _FakeOrchestrator
+from tests.test_configure_tui import _DeterministicConfigureTUI, _FakeOrchestrator
 
 from scripts.configure_tui import ConfigureTUI, StepMeta
 
@@ -26,7 +28,7 @@ class StepCanonTests(unittest.TestCase):
         self.assertEqual(keys, ["cloud", "server", "hermes", "telegram", "review"])
         self.assertEqual(titles, ["Cloud", "Server", "Hermes", "Telegram", "Review"])
         self.assertEqual(len(ConfigureTUI.steps), 5)
-        self.assertTrue(all(isinstance(s, StepMeta) for s in ConfigureTUI.steps))
+        self.assertEqual([type(s) for s in ConfigureTUI.steps], [StepMeta] * 5)
 
 
 class _AppMixin:

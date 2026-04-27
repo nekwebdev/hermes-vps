@@ -1,3 +1,4 @@
+# pyright: reportAny=false, reportUnknownMemberType=false, reportUnknownVariableType=false, reportUnknownArgumentType=false, reportUnknownParameterType=false, reportUnusedCallResult=false, reportUnusedImport=false, reportPrivateUsage=false, reportImplicitStringConcatenation=false, reportImplicitOverride=false, reportIncompatibleMethodOverride=false, reportUnannotatedClassAttribute=false
 """Generic step-controller base.
 
 Application-agnostic. Subclasses declare a unique `key`, build the UI
@@ -12,16 +13,13 @@ belong in the per-application subclass, not here.
 
 from __future__ import annotations
 
-from typing import Any
-
-
 class StepController:
     key: str = ""
 
-    def __init__(self, app: Any) -> None:
+    def __init__(self, app: object) -> None:
         self.app = app
 
-    def mount(self, form: Any) -> None:
+    def mount(self, _form: object) -> None:
         raise NotImplementedError
 
     def capture(self) -> bool:

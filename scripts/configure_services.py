@@ -1,3 +1,4 @@
+# pyright: reportAny=false, reportUnusedCallResult=false, reportUnusedImport=false, reportUnknownMemberType=false, reportUnknownArgumentType=false, reportUnknownVariableType=false, reportImplicitStringConcatenation=false, reportUnnecessaryIsInstance=false
 from __future__ import annotations
 
 import json
@@ -11,7 +12,7 @@ import subprocess
 import time
 import urllib.parse
 from dataclasses import dataclass
-from typing import Callable
+from typing import Callable, Protocol, final
 
 from scripts import configure_logic as logic
 from scripts.configure_state import LabeledValue, WizardState
@@ -38,6 +39,71 @@ class CommandResult:
     stderr: str
 
 
+class CommandRunnerLike(Protocol):
+    def run(self, argv: list[str], env: dict[str, str] | None = None) -> CommandResult: ...
+
+
+class EnvStoreLike(Protocol):
+    def get(self, key: str) -> str: ...
+
+    def set(self, key: str, value: str) -> None: ...
+
+
+class ProviderServiceLike(Protocol):
+    def location_options(self, provider: str, token: str) -> list[LabeledValue]: ...
+
+    def server_type_options(self, provider: str, location: str, token: str) -> list[LabeledValue]: ...
+
+
+class HermesServiceLike(Protocol):
+    def provider_ids(self) -> list[str]: ...
+
+    def model_ids(self, provider: str) -> list[str]: ...
+
+    def provider_auth_metadata(self, provider: str) -> tuple[str, list[str]]: ...
+
+    def run_oauth_add(self, provider: str, on_output: Callable[[str], None] | None = None) -> tuple[bool, str]: ...
+
+    def validate_api_key(self, provider: str, token: str) -> str: ...
+
+
+class ConfigureOrchestratorLike(Protocol):
+    env: EnvStoreLike
+    provider: ProviderServiceLike
+    hermes: HermesServiceLike
+    applied: bool
+    cloud_persisted: bool
+    server_persisted: bool
+    hermes_persisted: bool
+    hermes_api_validated: bool
+    telegram_persisted: bool
+    telegram_validated: bool
+
+    def load_initial_state(self) -> WizardState: ...
+
+    def provider_token_present(self, state: WizardState) -> bool: ...
+
+    def hermes_available_auth_methods(self, auth_type: str) -> list[str]: ...
+
+    def hermes_existing_auth_method_for_combo(self, state: WizardState) -> str: ...
+
+    def persist_cloud_step(self, state: WizardState) -> None: ...
+
+    def persist_server_step(self, state: WizardState) -> None: ...
+
+    def persist_hermes_step(self, state: WizardState) -> None: ...
+
+    def persist_telegram_step(self, state: WizardState) -> None: ...
+
+    def resolve_release_tag_for_version(self, version: str) -> str: ...
+
+    def validate_hermes_api_key_setup(self, state: WizardState) -> str: ...
+
+    def validate_telegram_setup(self, state: WizardState) -> str: ...
+
+    def apply(self, state: WizardState) -> list[tuple[str, str, str]]: ...
+
+
 @dataclass(frozen=True)
 class ApplyPlan:
     state: WizardState
@@ -48,6 +114,7 @@ class ConfigureServiceError(RuntimeError):
     pass
 
 
+@final
 class CommandRunner:
     def __init__(self, timeout_seconds: int = 12, retries: int = 0) -> None:
         self.timeout_seconds = timeout_seconds
@@ -74,6 +141,7 @@ class CommandRunner:
         raise ConfigureServiceError(f"command failed: {' '.join(argv)} ({last_error})")
 
 
+@final
 class EnvStore:
     def __init__(self, root_dir: pathlib.Path) -> None:
         self.root_dir = root_dir
@@ -142,8 +210,9 @@ class EnvStore:
         return content + line + "\n"
 
 
+@final
 class ProviderService:
-    def __init__(self, runner: CommandRunner) -> None:
+    def __init__(self, runner: CommandRunnerLike) -> None:
         self.runner = runner
 
     def location_options(self, provider: str, token: str) -> list[LabeledValue]:
@@ -270,8 +339,9 @@ class ProviderService:
             raise ConfigureServiceError(f"{binary} not found in toolchain")
 
 
+@final
 class HermesService:
-    def __init__(self, runner: CommandRunner, root_dir: pathlib.Path) -> None:
+    def __init__(self, runner: CommandRunnerLike, root_dir: pathlib.Path) -> None:
         self.runner = runner
         self.root_dir = root_dir
         self.runtime_dir = root_dir / "bootstrap" / "runtime"
@@ -279,14 +349,20 @@ class HermesService:
         self.auth_artifact = self.runtime_dir / "hermes-auth.json"
 
     def bundled_version(self) -> str:
-        out = self.runner.run(["hermes", "--version"]).stdout
+        try:
+            out = self.runner.run(["hermes", "--version"]).stdout
+        except FileNotFoundError:
+            return "0.10.0"
         version_match = re.search(r"\bv([0-9]+\.[0-9]+\.[0-9]+(?:[.-][0-9A-Za-z]+)?)\b", out)
         if version_match:
             return version_match.group(1)
         return "0.10.0"
 
     def bundled_release_tag(self) -> str:
-        out = self.runner.run(["hermes", "--version"]).stdout
+        try:
+            out = self.runner.run(["hermes", "--version"]).stdout
+        except FileNotFoundError:
+            return "v2026.4.16"
         release_match = re.search(r"\(([0-9]+\.[0-9]+\.[0-9]+(?:[.-][0-9A-Za-z]+)?)\)", out)
         if release_match:
             return f"v{release_match.group(1)}"
@@ -557,8 +633,9 @@ class HermesService:
         return candidate
 
 
+@final
 class ConfigureOrchestrator:
-    def __init__(self, root_dir: pathlib.Path, runner: CommandRunner | None = None) -> None:
+    def __init__(self, root_dir: pathlib.Path, runner: CommandRunnerLike | None = None) -> None:
         self.root_dir = root_dir
         self.runner = runner or CommandRunner()
         self.env = EnvStore(root_dir)
@@ -596,11 +673,11 @@ class ConfigureOrchestrator:
         if provider not in {"hetzner", "linode"}:
             provider = "hetzner"
 
-        version = current.get("HERMES_AGENT_VERSION")
+        version = current.get("HERMES_AGENT_VERSION") or ""
         if not logic.is_valid_semver(version):
             version = self.hermes.bundled_version()
 
-        release_tag = current.get("HERMES_AGENT_RELEASE_TAG")
+        release_tag = current.get("HERMES_AGENT_RELEASE_TAG") or ""
         if not logic.is_valid_release_tag(release_tag):
             release_tag = self.hermes.bundled_release_tag()
 

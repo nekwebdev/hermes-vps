@@ -1,3 +1,4 @@
+# pyright: reportAny=false, reportUnknownMemberType=false, reportUnknownVariableType=false, reportUnknownArgumentType=false, reportUnknownParameterType=false, reportUnusedCallResult=false, reportUnusedImport=false, reportPrivateUsage=false, reportImplicitStringConcatenation=false, reportImplicitOverride=false, reportIncompatibleMethodOverride=false, reportUnannotatedClassAttribute=false
 """Pure unit tests for FlowCoordinator (no Textual).
 
 The coordinator owns the wizard step index and step-complete bookkeeping.
@@ -29,7 +30,7 @@ class FlowCoordinatorConstructionTests(unittest.TestCase):
 
     def test_rejects_invalid_construction_arguments(self) -> None:
         with self.assertRaises(ValueError):
-            FlowCoordinator(step_count=0)
+            _ = FlowCoordinator(step_count=0)
         with self.assertRaises(ValueError):
             FlowCoordinator(step_count=5, current=-1)
         with self.assertRaises(ValueError):

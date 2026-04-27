@@ -13,7 +13,10 @@ counters, provider-name comparisons) into one uniform staleness rule.
 
 from __future__ import annotations
 
+from typing import final
 
+
+@final
 class CorrelatedTask:
     def __init__(self) -> None:
         self._seq = 0

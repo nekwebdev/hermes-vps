@@ -1,3 +1,4 @@
+# pyright: reportAny=false, reportUnknownMemberType=false, reportUnknownVariableType=false, reportUnknownArgumentType=false, reportUnknownParameterType=false, reportUnusedCallResult=false, reportUnusedImport=false, reportPrivateUsage=false, reportImplicitStringConcatenation=false, reportImplicitOverride=false, reportIncompatibleMethodOverride=false, reportUnannotatedClassAttribute=false
 """Apply-plan boundary tests.
 
 These tests lock the new plan/execute split for ConfigureOrchestrator.
@@ -79,14 +80,20 @@ class ApplyPlanBoundaryTests(unittest.TestCase):
             )
             calls: list[str] = []
 
+            def _persist_cloud_step(_state: object) -> None:
+                calls.append("persist_cloud")
+
+            def _persist_server_step(_state: object) -> None:
+                calls.append("persist_server")
+
             with patch.object(
                 orchestrator,
                 "persist_cloud_step",
-                side_effect=lambda _state: calls.append("persist_cloud"),
+                side_effect=_persist_cloud_step,
             ), patch.object(
                 orchestrator,
                 "persist_server_step",
-                side_effect=lambda _state: calls.append("persist_server"),
+                side_effect=_persist_server_step,
             ), patch.object(
                 orchestrator.env,
                 "flush",

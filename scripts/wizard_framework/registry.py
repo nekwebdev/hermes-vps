@@ -24,8 +24,10 @@ class StepRegistry:
     def get(self, key: str) -> StepController | None:
         return self._controllers.get(key)
 
-    def __contains__(self, key: str) -> bool:
-        return key in self._controllers
+    def __contains__(self, x: object) -> bool:
+        if not isinstance(x, str):
+            return False
+        return x in self._controllers
 
     def __len__(self) -> int:
         return len(self._controllers)

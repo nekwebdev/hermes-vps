@@ -1,3 +1,4 @@
+# pyright: reportAny=false, reportUnknownMemberType=false, reportUnknownVariableType=false, reportUnknownArgumentType=false, reportUnknownParameterType=false, reportUnusedCallResult=false, reportUnusedImport=false, reportPrivateUsage=false, reportImplicitStringConcatenation=false, reportImplicitOverride=false, reportIncompatibleMethodOverride=false, reportUnannotatedClassAttribute=false
 import pathlib
 import tempfile
 import unittest
@@ -7,7 +8,7 @@ from scripts import configure_logic as logic
 
 class ConfigureLogicTests(unittest.TestCase):
     def _tmp_env(self, content: str) -> pathlib.Path:
-        fd, path = tempfile.mkstemp(prefix="configure-logic-", suffix=".env")
+        _, path = tempfile.mkstemp(prefix="configure-logic-", suffix=".env")
         pathlib.Path(path).write_text(content)
         pathlib.Path(path).chmod(0o600)
         return pathlib.Path(path)

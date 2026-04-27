@@ -19,6 +19,7 @@ Design rules:
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import final
 
 
 @dataclass(frozen=True)
@@ -28,6 +29,7 @@ class TransitionResult:
     finished: bool = False
 
 
+@final
 class FlowCoordinator:
     def __init__(self, step_count: int, current: int = 0) -> None:
         if step_count <= 0:

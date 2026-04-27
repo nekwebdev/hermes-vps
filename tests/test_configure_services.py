@@ -1,7 +1,8 @@
+# pyright: reportUnusedCallResult=false, reportImplicitStringConcatenation=false, reportUnannotatedClassAttribute=false
 import pathlib
 import tempfile
 import unittest
-from unittest.mock import MagicMock
+from unittest import mock
 
 from scripts.configure_services import (
     CommandResult,
@@ -73,7 +74,7 @@ class ConfigureServicesTests(unittest.TestCase):
             orchestrator.hermes.auth_artifact = (
                 root / "bootstrap" / "runtime" / "hermes-auth.json"
             )
-            orchestrator.hermes.auth_artifact_exists = MagicMock(return_value=True)
+            orchestrator.hermes.auth_artifact_exists = mock.MagicMock(return_value=True)
 
             state = orchestrator.load_initial_state()
 
@@ -85,13 +86,13 @@ class ConfigureServicesTests(unittest.TestCase):
     def test_apply_hybrid_auth_uses_api_key_path_when_key_provided(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             orchestrator = self._make_orchestrator(pathlib.Path(tmp))
-            orchestrator.hermes.has_local_auth = MagicMock(return_value=True)
-            orchestrator.hermes.stage_local_auth_artifact = MagicMock(return_value=True)
-            orchestrator.hermes.clear_auth_artifact = MagicMock()
-            orchestrator.ensure_ssh_key_material = MagicMock(return_value=("/tmp/hermes-test-key", "ssh-ed25519 AAAA test"))
-            orchestrator.ensure_repo_ssh_alias = MagicMock(return_value=True)
-            orchestrator.remove_repo_ssh_alias = MagicMock(return_value=True)
-            orchestrator.telegram_token_present = MagicMock(return_value=True)
+            orchestrator.hermes.has_local_auth = mock.MagicMock(return_value=True)
+            orchestrator.hermes.stage_local_auth_artifact = mock.MagicMock(return_value=True)
+            orchestrator.hermes.clear_auth_artifact = mock.MagicMock()
+            orchestrator.ensure_ssh_key_material = mock.MagicMock(return_value=("/tmp/hermes-test-key", "ssh-ed25519 AAAA test"))
+            orchestrator.ensure_repo_ssh_alias = mock.MagicMock(return_value=True)
+            orchestrator.remove_repo_ssh_alias = mock.MagicMock(return_value=True)
+            orchestrator.telegram_token_present = mock.MagicMock(return_value=True)
 
             state = self._base_state()
             state.hermes_auth_type = "oauth_external+api_key"
@@ -110,14 +111,14 @@ class ConfigureServicesTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             orchestrator = self._make_orchestrator(pathlib.Path(tmp))
             orchestrator.hermes.auth_artifact = pathlib.Path(tmp) / "bootstrap" / "runtime" / "hermes-auth.json"
-            orchestrator.hermes.has_local_auth = MagicMock(return_value=True)
-            orchestrator.hermes.auth_artifact_exists = MagicMock(side_effect=[False, True])
-            orchestrator.hermes.stage_local_auth_artifact = MagicMock(return_value=True)
-            orchestrator.hermes.clear_auth_artifact = MagicMock()
-            orchestrator.ensure_ssh_key_material = MagicMock(return_value=("/tmp/hermes-test-key", "ssh-ed25519 AAAA test"))
-            orchestrator.ensure_repo_ssh_alias = MagicMock(return_value=True)
-            orchestrator.remove_repo_ssh_alias = MagicMock(return_value=True)
-            orchestrator.telegram_token_present = MagicMock(return_value=True)
+            orchestrator.hermes.has_local_auth = mock.MagicMock(return_value=True)
+            orchestrator.hermes.auth_artifact_exists = mock.MagicMock(side_effect=[False, True])
+            orchestrator.hermes.stage_local_auth_artifact = mock.MagicMock(return_value=True)
+            orchestrator.hermes.clear_auth_artifact = mock.MagicMock()
+            orchestrator.ensure_ssh_key_material = mock.MagicMock(return_value=("/tmp/hermes-test-key", "ssh-ed25519 AAAA test"))
+            orchestrator.ensure_repo_ssh_alias = mock.MagicMock(return_value=True)
+            orchestrator.remove_repo_ssh_alias = mock.MagicMock(return_value=True)
+            orchestrator.telegram_token_present = mock.MagicMock(return_value=True)
 
             state = self._base_state()
             state.hermes_auth_type = "oauth_external+api_key"
@@ -134,8 +135,8 @@ class ConfigureServicesTests(unittest.TestCase):
     def test_validate_telegram_setup_accepts_valid_token_and_allowlist(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             orchestrator = self._make_orchestrator(pathlib.Path(tmp))
-            orchestrator.runner.run = MagicMock(
-                return_value=MagicMock(
+            orchestrator.runner.run = mock.MagicMock(
+                return_value=mock.MagicMock(
                     stdout='{"ok": true, "result": {"username": "my_test_bot"}}',
                     stderr="",
                 )
@@ -163,7 +164,7 @@ class ConfigureServicesTests(unittest.TestCase):
     def test_validate_telegram_setup_rejects_invalid_token_with_clean_message(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             orchestrator = self._make_orchestrator(pathlib.Path(tmp))
-            orchestrator.runner.run = MagicMock(
+            orchestrator.runner.run = mock.MagicMock(
                 side_effect=ConfigureServiceError("command failed: curl ...")
             )
 
@@ -179,7 +180,7 @@ class ConfigureServicesTests(unittest.TestCase):
     def test_validate_hermes_api_key_setup_calls_provider_validation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             orchestrator = self._make_orchestrator(pathlib.Path(tmp))
-            orchestrator.hermes.validate_api_key = MagicMock(
+            orchestrator.hermes.validate_api_key = mock.MagicMock(
                 return_value="Hermes API key valid for openai-codex."
             )
             state = self._base_state()
@@ -197,9 +198,9 @@ class ConfigureServicesTests(unittest.TestCase):
     def test_persist_hermes_step_uses_bundled_release_tag_for_bundled_version(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             orchestrator = self._make_orchestrator(pathlib.Path(tmp))
-            orchestrator.hermes.bundled_version = MagicMock(return_value="0.10.0")
-            orchestrator.hermes.bundled_release_tag = MagicMock(return_value="v2026.4.16")
-            orchestrator.hermes.clear_auth_artifact = MagicMock()
+            orchestrator.hermes.bundled_version = mock.MagicMock(return_value="0.10.0")
+            orchestrator.hermes.bundled_release_tag = mock.MagicMock(return_value="v2026.4.16")
+            orchestrator.hermes.clear_auth_artifact = mock.MagicMock()
 
             state = self._base_state()
             state.hermes_agent_version = "0.10.0"
@@ -238,11 +239,11 @@ class ConfigureServicesTests(unittest.TestCase):
                 "TELEGRAM_BOT_TOKEN=existing-telegram\n"
             )
             orchestrator = ConfigureOrchestrator(root)
-            orchestrator.ensure_ssh_key_material = MagicMock(return_value=("/tmp/hermes-test-key", "ssh-ed25519 AAAA test"))
-            orchestrator.ensure_repo_ssh_alias = MagicMock(return_value=True)
-            orchestrator.remove_repo_ssh_alias = MagicMock(return_value=True)
-            orchestrator.hermes.clear_auth_artifact = MagicMock()
-            orchestrator.telegram_token_present = MagicMock(return_value=True)
+            orchestrator.ensure_ssh_key_material = mock.MagicMock(return_value=("/tmp/hermes-test-key", "ssh-ed25519 AAAA test"))
+            orchestrator.ensure_repo_ssh_alias = mock.MagicMock(return_value=True)
+            orchestrator.remove_repo_ssh_alias = mock.MagicMock(return_value=True)
+            orchestrator.hermes.clear_auth_artifact = mock.MagicMock()
+            orchestrator.telegram_token_present = mock.MagicMock(return_value=True)
 
             state = self._base_state()
             state.provider = "linode"
@@ -274,7 +275,7 @@ class ConfigureServicesTests(unittest.TestCase):
             (root / ".env.example").write_text("HERMES_API_KEY=old-key\n")
             (root / ".env").write_text("HERMES_API_KEY=old-key\n")
             orchestrator = ConfigureOrchestrator(root)
-            orchestrator.hermes.validate_api_key = MagicMock(
+            orchestrator.hermes.validate_api_key = mock.MagicMock(
                 return_value="Hermes API key valid for openai-codex."
             )
 
@@ -338,7 +339,7 @@ class ConfigureServicesTests(unittest.TestCase):
         )
         service = ProviderService(runner)
 
-        with unittest.mock.patch.object(
+        with mock.patch.object(
             ProviderService, "_require_binary", return_value=None
         ):
             with self.assertRaises(ConfigureServiceError) as ctx:
@@ -360,7 +361,7 @@ class ConfigureServicesTests(unittest.TestCase):
         )
         service = ProviderService(runner)
 
-        with unittest.mock.patch.object(
+        with mock.patch.object(
             ProviderService, "_require_binary", return_value=None
         ):
             rows = service.location_options("linode", "good-token")
@@ -396,7 +397,7 @@ class ConfigureServicesTests(unittest.TestCase):
             home_ssh.mkdir(parents=True, exist_ok=True)
             (home_ssh / "config").write_text("Host keep\n  HostName keep\n")
 
-            with unittest.mock.patch("pathlib.Path.home", return_value=home):
+            with mock.patch("pathlib.Path.home", return_value=home):
                 changed = orchestrator.ensure_repo_ssh_alias(
                     alias_user="opsadmin",
                     alias_key_path="/tmp/new-key",
@@ -449,7 +450,7 @@ class ConfigureServicesTests(unittest.TestCase):
                 f"{include_line}\n"
             )
 
-            with unittest.mock.patch("pathlib.Path.home", return_value=home):
+            with mock.patch("pathlib.Path.home", return_value=home):
                 changed = orchestrator.remove_repo_ssh_alias()
 
             self.assertTrue(changed)

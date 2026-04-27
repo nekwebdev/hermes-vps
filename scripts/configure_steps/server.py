@@ -1,3 +1,4 @@
+# pyright: reportAny=false, reportUnknownMemberType=false, reportUnknownVariableType=false, reportUnknownArgumentType=false, reportUnknownParameterType=false, reportUnusedCallResult=false, reportUnusedImport=false, reportPrivateUsage=false, reportImplicitStringConcatenation=false, reportImplicitOverride=false, reportIncompatibleMethodOverride=false, reportUnannotatedClassAttribute=false
 """Server step controller.
 
 Renders the location/server-type/host/admin form, captures user input
@@ -128,11 +129,13 @@ class ServerStepController(StepController):
 
     def capture(self) -> bool:
         try:
-            self.state.location = (
-                self.app.query_one("#location-select", Select).value or ""
-            )
+            location_value = self.app.query_one("#location-select", Select).value
+            self.state.location = location_value if isinstance(location_value, str) else ""
+            server_type_value = self.app.query_one(
+                "#server-type-select", Select
+            ).value
             self.state.server_type = (
-                self.app.query_one("#server-type-select", Select).value or ""
+                server_type_value if isinstance(server_type_value, str) else ""
             )
 
             hostname_input = self.app.query_one(

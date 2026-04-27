@@ -11,6 +11,7 @@ These tests pin three guarantees for the wizard's commit phase:
    alias reconciliation), the .env file on disk is unchanged. This is
    the partial-commit floor: stages cannot leak past a failed step.
 """
+# pyright: reportUnknownArgumentType=false, reportUnknownParameterType=false, reportMissingParameterType=false, reportUnusedCallResult=false, reportUnannotatedClassAttribute=false, reportImplicitStringConcatenation=false, reportPrivateUsage=false
 
 from __future__ import annotations
 
@@ -65,7 +66,11 @@ class ApplyEffectOrderTests(unittest.TestCase):
 
 
 class EnvFlushAtomicityTests(unittest.TestCase):
-    def setUp(self) -> None:
+    fixture: _RepoFixture
+    store: EnvStore
+
+    def __init__(self, methodName: str = "runTest") -> None:
+        super().__init__(methodName)
         self.fixture = _RepoFixture()
         self.addCleanup(self.fixture.cleanup)
         self.store = EnvStore(self.fixture.tmpdir)
@@ -152,7 +157,10 @@ class EnvFlushAtomicityTests(unittest.TestCase):
 
 
 class ApplyPartialCommitTests(unittest.TestCase):
-    def setUp(self) -> None:
+    fixture: _RepoFixture
+
+    def __init__(self, methodName: str = "runTest") -> None:
+        super().__init__(methodName)
         self.fixture = _RepoFixture()
         self.addCleanup(self.fixture.cleanup)
 

@@ -1,0 +1,6 @@
+....................................................Executing <Task pending name="message pump Screen(id='_default')" coro=<MessagePump._process_messages() running at /nix/store/s04bnkpvf60v9gwxi6i9vj3l2rn15lgq-python3-3.12.8-env/lib/python3.12/site-packages/textual/message_pump.py:513> wait_for=<Future pending cb=[Task.task_wakeup()] created at /nix/store/dksjvr69ckglyw1k2ss1qgshhcix73p8-python3-3.12.8/lib/python3.12/asyncio/base_events.py:448> created at /nix/store/dksjvr69ckglyw1k2ss1qgshhcix73p8-python3-3.12.8/lib/python3.12/asyncio/tasks.py:420> took 0.102 seconds
+..............................................................
+----------------------------------------------------------------------
+Ran 114 tests in 37.082s
+
+OK
