@@ -1,0 +1,5 @@
+{
+  "extraPaths": [
+    "/nix/store/s04bnkpvf60v9gwxi6i9vj3l2rn15lgq-python3-3.12.8-env/lib/python3.12/site-packages"
+  ]
+}

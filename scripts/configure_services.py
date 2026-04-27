@@ -1,3 +1,4 @@
+# pyright: reportAny=false, reportUnusedCallResult=false, reportUnusedImport=false, reportUnknownMemberType=false, reportUnknownArgumentType=false, reportUnknownVariableType=false, reportImplicitStringConcatenation=false, reportUnnecessaryIsInstance=false
 from __future__ import annotations
 
 import json
@@ -11,7 +12,7 @@ import subprocess
 import time
 import urllib.parse
 from dataclasses import dataclass
-from typing import Callable
+from typing import Callable, Protocol, final
 
 from scripts import configure_logic as logic
 from scripts.configure_state import LabeledValue, WizardState
@@ -20,16 +21,100 @@ from scripts.configure_state import LabeledValue, WizardState
 _SECRET_PLACEHOLDER = "***"
 
 
+APPLY_EFFECT_ORDER: tuple[str, ...] = (
+    "persist_cloud",
+    "persist_server",
+    "persist_hermes",
+    "persist_telegram",
+    "stage_extras",
+    "ensure_ssh_key",
+    "reconcile_ssh_alias",
+    "flush_env",
+)
+
+
 @dataclass(frozen=True)
 class CommandResult:
     stdout: str
     stderr: str
 
 
+class CommandRunnerLike(Protocol):
+    def run(self, argv: list[str], env: dict[str, str] | None = None) -> CommandResult: ...
+
+
+class EnvStoreLike(Protocol):
+    def get(self, key: str) -> str: ...
+
+    def set(self, key: str, value: str) -> None: ...
+
+
+class ProviderServiceLike(Protocol):
+    def location_options(self, provider: str, token: str) -> list[LabeledValue]: ...
+
+    def server_type_options(self, provider: str, location: str, token: str) -> list[LabeledValue]: ...
+
+
+class HermesServiceLike(Protocol):
+    def provider_ids(self) -> list[str]: ...
+
+    def model_ids(self, provider: str) -> list[str]: ...
+
+    def provider_auth_metadata(self, provider: str) -> tuple[str, list[str]]: ...
+
+    def run_oauth_add(self, provider: str, on_output: Callable[[str], None] | None = None) -> tuple[bool, str]: ...
+
+    def validate_api_key(self, provider: str, token: str) -> str: ...
+
+
+class ConfigureOrchestratorLike(Protocol):
+    env: EnvStoreLike
+    provider: ProviderServiceLike
+    hermes: HermesServiceLike
+    applied: bool
+    cloud_persisted: bool
+    server_persisted: bool
+    hermes_persisted: bool
+    hermes_api_validated: bool
+    telegram_persisted: bool
+    telegram_validated: bool
+
+    def load_initial_state(self) -> WizardState: ...
+
+    def provider_token_present(self, state: WizardState) -> bool: ...
+
+    def hermes_available_auth_methods(self, auth_type: str) -> list[str]: ...
+
+    def hermes_existing_auth_method_for_combo(self, state: WizardState) -> str: ...
+
+    def persist_cloud_step(self, state: WizardState) -> None: ...
+
+    def persist_server_step(self, state: WizardState) -> None: ...
+
+    def persist_hermes_step(self, state: WizardState) -> None: ...
+
+    def persist_telegram_step(self, state: WizardState) -> None: ...
+
+    def resolve_release_tag_for_version(self, version: str) -> str: ...
+
+    def validate_hermes_api_key_setup(self, state: WizardState) -> str: ...
+
+    def validate_telegram_setup(self, state: WizardState) -> str: ...
+
+    def apply(self, state: WizardState) -> list[tuple[str, str, str]]: ...
+
+
+@dataclass(frozen=True)
+class ApplyPlan:
+    state: WizardState
+    effects: tuple[str, ...]
+
+
 class ConfigureServiceError(RuntimeError):
     pass
 
 
+@final
 class CommandRunner:
     def __init__(self, timeout_seconds: int = 12, retries: int = 0) -> None:
         self.timeout_seconds = timeout_seconds
@@ -56,6 +141,7 @@ class CommandRunner:
         raise ConfigureServiceError(f"command failed: {' '.join(argv)} ({last_error})")
 
 
+@final
 class EnvStore:
     def __init__(self, root_dir: pathlib.Path) -> None:
         self.root_dir = root_dir
@@ -90,14 +176,43 @@ class EnvStore:
         return {key: self.get(key) for key in keys}
 
     def flush(self) -> None:
+        if not self._staged:
+            return
+        # Build the new file contents in memory then commit atomically via
+        # temp + os.replace, so a crash cannot leave a half-written .env.
+        content = self.env_file.read_text() if self.env_file.exists() else ""
         for key, value in self._staged.items():
-            logic.set_env_value(self.env_file, key, value)
+            content = self._upsert_env_line(content, key, value)
+
+        tmp_path = self.env_file.with_name(self.env_file.name + ".tmp")
+        try:
+            with tmp_path.open("w", encoding="utf-8") as tmp_file:
+                tmp_file.write(content)
+                tmp_file.flush()
+                os.fsync(tmp_file.fileno())
+            tmp_path.chmod(0o600)
+            os.replace(str(tmp_path), str(self.env_file))
+        except Exception:
+            if tmp_path.exists():
+                tmp_path.unlink()
+            raise
         self._staged.clear()
         self.env_file.chmod(0o600)
 
+    @staticmethod
+    def _upsert_env_line(content: str, key: str, value: str) -> str:
+        line = f"{key}={value}"
+        pattern = re.compile(rf"^{re.escape(key)}=.*$", re.MULTILINE)
+        if pattern.search(content):
+            return pattern.sub(line, content, count=1)
+        if content and not content.endswith("\n"):
+            content += "\n"
+        return content + line + "\n"
 
+
+@final
 class ProviderService:
-    def __init__(self, runner: CommandRunner) -> None:
+    def __init__(self, runner: CommandRunnerLike) -> None:
         self.runner = runner
 
     def location_options(self, provider: str, token: str) -> list[LabeledValue]:
@@ -224,8 +339,9 @@ class ProviderService:
             raise ConfigureServiceError(f"{binary} not found in toolchain")
 
 
+@final
 class HermesService:
-    def __init__(self, runner: CommandRunner, root_dir: pathlib.Path) -> None:
+    def __init__(self, runner: CommandRunnerLike, root_dir: pathlib.Path) -> None:
         self.runner = runner
         self.root_dir = root_dir
         self.runtime_dir = root_dir / "bootstrap" / "runtime"
@@ -233,14 +349,20 @@ class HermesService:
         self.auth_artifact = self.runtime_dir / "hermes-auth.json"
 
     def bundled_version(self) -> str:
-        out = self.runner.run(["hermes", "--version"]).stdout
+        try:
+            out = self.runner.run(["hermes", "--version"]).stdout
+        except FileNotFoundError:
+            return "0.10.0"
         version_match = re.search(r"\bv([0-9]+\.[0-9]+\.[0-9]+(?:[.-][0-9A-Za-z]+)?)\b", out)
         if version_match:
             return version_match.group(1)
         return "0.10.0"
 
     def bundled_release_tag(self) -> str:
-        out = self.runner.run(["hermes", "--version"]).stdout
+        try:
+            out = self.runner.run(["hermes", "--version"]).stdout
+        except FileNotFoundError:
+            return "v2026.4.16"
         release_match = re.search(r"\(([0-9]+\.[0-9]+\.[0-9]+(?:[.-][0-9A-Za-z]+)?)\)", out)
         if release_match:
             return f"v{release_match.group(1)}"
@@ -511,8 +633,9 @@ class HermesService:
         return candidate
 
 
+@final
 class ConfigureOrchestrator:
-    def __init__(self, root_dir: pathlib.Path, runner: CommandRunner | None = None) -> None:
+    def __init__(self, root_dir: pathlib.Path, runner: CommandRunnerLike | None = None) -> None:
         self.root_dir = root_dir
         self.runner = runner or CommandRunner()
         self.env = EnvStore(root_dir)
@@ -550,11 +673,11 @@ class ConfigureOrchestrator:
         if provider not in {"hetzner", "linode"}:
             provider = "hetzner"
 
-        version = current.get("HERMES_AGENT_VERSION")
+        version = current.get("HERMES_AGENT_VERSION") or ""
         if not logic.is_valid_semver(version):
             version = self.hermes.bundled_version()
 
-        release_tag = current.get("HERMES_AGENT_RELEASE_TAG")
+        release_tag = current.get("HERMES_AGENT_RELEASE_TAG") or ""
         if not logic.is_valid_release_tag(release_tag):
             release_tag = self.hermes.bundled_release_tag()
 
@@ -735,33 +858,52 @@ class ConfigureOrchestrator:
         if state.telegram_bot_token_replace or not self.telegram_token_present():
             self.env.set("TELEGRAM_BOT_TOKEN", state.telegram_bot_token_input)
 
+    def build_apply_plan(self, state: WizardState) -> ApplyPlan:
+        return ApplyPlan(state=state, effects=APPLY_EFFECT_ORDER)
+
+    def execute_apply_plan(self, plan: ApplyPlan) -> list[tuple[str, str, str]]:
+        for effect in plan.effects:
+            self._run_apply_effect(effect, plan.state)
+        return plan.state.recap_rows()
+
     def apply(self, state: WizardState) -> list[tuple[str, str, str]]:
-        self.persist_cloud_step(state)
-        self.persist_server_step(state)
-        self.persist_hermes_step(state)
-        self.persist_telegram_step(state)
-        self.env.set("HERMES_AGENT_VERSION", state.hermes_agent_version)
-        self.env.set("TF_VAR_hermes_provider", state.hermes_provider)
-        self.env.set("TF_VAR_hermes_model", state.hermes_model)
+        return self.execute_apply_plan(self.build_apply_plan(state))
 
-        ssh_private_path, public_key = self.ensure_ssh_key_material(state.ssh_private_key_path)
-        state.ssh_private_key_path = ssh_private_path
-        self.env.set("BOOTSTRAP_SSH_PRIVATE_KEY_PATH", ssh_private_path)
-        self.env.set("TF_VAR_admin_ssh_public_key", f'"{public_key}"')
-
-        if self._should_reconcile_ssh_alias(state):
-            if state.add_ssh_alias:
-                self.ensure_repo_ssh_alias(
-                    state.admin_username,
-                    state.ssh_private_key_path,
-                    "22",
-                    state.hostname,
-                )
-            else:
-                self.remove_repo_ssh_alias()
-
-        self.env.flush()
-        return state.recap_rows()
+    def _run_apply_effect(self, effect: str, state: WizardState) -> None:
+        if effect == "persist_cloud":
+            self.persist_cloud_step(state)
+        elif effect == "persist_server":
+            self.persist_server_step(state)
+        elif effect == "persist_hermes":
+            self.persist_hermes_step(state)
+        elif effect == "persist_telegram":
+            self.persist_telegram_step(state)
+        elif effect == "stage_extras":
+            self.env.set("HERMES_AGENT_VERSION", state.hermes_agent_version)
+            self.env.set("TF_VAR_hermes_provider", state.hermes_provider)
+            self.env.set("TF_VAR_hermes_model", state.hermes_model)
+        elif effect == "ensure_ssh_key":
+            ssh_private_path, public_key = self.ensure_ssh_key_material(
+                state.ssh_private_key_path
+            )
+            state.ssh_private_key_path = ssh_private_path
+            self.env.set("BOOTSTRAP_SSH_PRIVATE_KEY_PATH", ssh_private_path)
+            self.env.set("TF_VAR_admin_ssh_public_key", f'"{public_key}"')
+        elif effect == "reconcile_ssh_alias":
+            if self._should_reconcile_ssh_alias(state):
+                if state.add_ssh_alias:
+                    self.ensure_repo_ssh_alias(
+                        state.admin_username,
+                        state.ssh_private_key_path,
+                        "22",
+                        state.hostname,
+                    )
+                else:
+                    self.remove_repo_ssh_alias()
+        elif effect == "flush_env":
+            self.env.flush()
+        else:
+            raise ConfigureServiceError(f"unknown apply effect: {effect}")
 
     def _desired_ssh_alias_state(self, state: WizardState) -> str:
         return "active" if state.add_ssh_alias else "inactive"

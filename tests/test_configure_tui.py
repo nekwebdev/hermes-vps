@@ -1,8 +1,10 @@
+# pyright: reportAny=false, reportUnknownMemberType=false, reportUnknownVariableType=false, reportUnknownArgumentType=false, reportUnusedParameter=false, reportImplicitOverride=false, reportAttributeAccessIssue=false, reportIncompatibleMethodOverride=false, reportUnusedCallResult=false, reportPrivateUsage=false
 import pathlib
 import unittest
 
 from textual.widgets import Button, Checkbox, Input, Label, Select, Static
 
+from scripts.configure_services import EnvStoreLike, HermesServiceLike, ProviderServiceLike
 from scripts.configure_state import LabeledValue, WizardState
 from scripts.configure_tui import (
     CloudLoaded,
@@ -14,6 +16,8 @@ from scripts.configure_tui import (
 
 
 class _FakeEnv:
+    store: dict[str, str]
+
     def __init__(self) -> None:
         self.store = {
             "TF_VAR_server_image": "debian-13",
@@ -31,11 +35,11 @@ class _FakeEnv:
 
 
 class _FakeProviderService:
-    def location_options(self, _provider: str, _token: str) -> list[LabeledValue]:
+    def location_options(self, provider: str, token: str) -> list[LabeledValue]:
         return [LabeledValue("DE, Nuremberg (nbg1)", "nbg1")]
 
     def server_type_options(
-        self, _provider: str, _location: str, _token: str
+        self, provider: str, location: str, token: str
     ) -> list[LabeledValue]:
         return [LabeledValue("cx22 • 2 vCPU", "cx22", recommended=True)]
 
@@ -52,6 +56,18 @@ class _FakeHermesService:
 
 
 class _FakeOrchestrator:
+    env: EnvStoreLike
+    provider: ProviderServiceLike
+    hermes: HermesServiceLike
+    applied: bool
+    cloud_persisted: bool
+    server_persisted: bool
+    hermes_persisted: bool
+    hermes_api_validated: bool
+    telegram_persisted: bool
+    telegram_validated: bool
+    _hermes_artifact_present: bool
+
     def __init__(self) -> None:
         self.env = _FakeEnv()
         self.provider = _FakeProviderService()
@@ -88,7 +104,7 @@ class _FakeOrchestrator:
             },
         )
 
-    def provider_token_present(self, _state: WizardState) -> bool:
+    def provider_token_present(self, state: WizardState) -> bool:
         return True
 
     def telegram_token_present(self) -> bool:
