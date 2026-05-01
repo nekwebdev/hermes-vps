@@ -1,3 +1,4 @@
+# pyright: reportImplicitAbstractClass=false, reportUnannotatedClassAttribute=false, reportImplicitOverride=false, reportUnusedCallResult=false
 from __future__ import annotations
 
 import os
@@ -13,7 +14,6 @@ from hermes_control_core.interfaces import (
     CommandFailed,
     CommandNotFound,
     CommandTimeout,
-    OutputLimitExceeded,
     RunRequest,
     RunResult,
     Runner,
@@ -27,7 +27,9 @@ _DEFAULT_OUTPUT_CAP_BYTES: Final[int] = 512_000
 
 
 class RunnerDetectionError(RunnerUnavailable):
-    pass
+    def __init__(self, message: str, selection: RunnerSelection | None = None) -> None:
+        super().__init__(message)
+        self.selection = selection
 
 
 class DetectionMode(str, Enum):
@@ -41,6 +43,16 @@ class DetectionMode(str, Enum):
 class RunnerSelection:
     mode: DetectionMode
     reason: str
+    lock_scope: str = "per-launch"
+    guidance: str = "Runner is locked for this process launch; restart the command after changing toolchain setup."
+
+    def to_dict(self) -> dict[str, str]:
+        return {
+            "mode": self.mode.value,
+            "reason": self.reason,
+            "lock_scope": self.lock_scope,
+            "guidance": self.guidance,
+        }
 
 
 class BaseRunner(Runner):
@@ -54,7 +66,7 @@ class BaseRunner(Runner):
         encoded = text.encode("utf-8", errors="replace")
         if len(encoded) <= self._output_cap_bytes:
             return text
-        kept = encoded[: self._output_cap_bytes]
+        kept = encoded[-self._output_cap_bytes :]
         return kept.decode("utf-8", errors="replace")
 
     def _assert_no_secrets_in_logs(self, _request: RunRequest) -> None:
@@ -125,8 +137,6 @@ class SubprocessRunner(BaseRunner):
         if len(stderr.encode("utf-8", errors="replace")) > self._output_cap_bytes:
             stderr = self._checked_output(stderr)
             truncated = True
-        if truncated:
-            raise OutputLimitExceeded("command output exceeded configured retention cap")
 
         result = RunResult(
             exit_code=completed.returncode,
@@ -136,6 +146,7 @@ class SubprocessRunner(BaseRunner):
             finished_at=finished,
             runner_mode=self.mode,
             redactions_applied=True,
+            output_truncated=truncated,
         )
         if completed.returncode != 0:
             raise CommandFailed(
@@ -167,7 +178,7 @@ class RunnerFactory:
         self.override_reason = (override_reason or "").strip()
         if self.allow_host_override and not self.override_reason:
             raise RunnerDetectionError(
-                "Host runner override requires non-empty override_reason for auditability."
+                "Host override requires non-empty override_reason (override reason) for auditability."
             )
         self.audit_log = audit_log
         self._locked: Runner | None = None
@@ -182,6 +193,7 @@ class RunnerFactory:
             return self._locked
 
         selection = self.detect()
+        self._preflight_selection(selection)
         runner = self._build(selection)
         self._selection = selection
         self._locked = runner
@@ -191,36 +203,69 @@ class RunnerFactory:
     def _record_selection(self, selection: RunnerSelection) -> None:
         if self.audit_log is None:
             return
-        self.audit_log.set_runner_selection(mode=selection.mode.value, reason=selection.reason)
+        self.audit_log.set_runner_selection(
+            mode=selection.mode.value,
+            reason=selection.reason,
+            lock_scope=selection.lock_scope,
+            guidance=selection.guidance,
+        )
 
     def detect(self) -> RunnerSelection:
         if self._is_direnv_attached_nix_shell():
             return RunnerSelection(
                 mode=DetectionMode.DIRENV_NIX,
                 reason="PATH/sys.executable indicate active nix store toolchain (direnv-attached)",
+                guidance="direnv-attached nix shell is active; no setup action is required.",
             )
 
         if shutil.which("nix"):
             return RunnerSelection(
                 mode=DetectionMode.NIX_DEVELOP,
                 reason="nix command available; use nix develop wrapper mode",
+                guidance="nix is available; commands will run through nix develop for this launch.",
             )
 
         if shutil.which("docker"):
             return RunnerSelection(
                 mode=DetectionMode.DOCKER_NIX,
                 reason="nix unavailable; docker present for nix container fallback",
+                guidance="Start the Docker daemon and ensure the current user can run docker, or install/activate nix/direnv.",
             )
 
         if self.allow_host_override:
             return RunnerSelection(
                 mode=DetectionMode.HOST,
                 reason=f"explicit host override enabled: {self.override_reason}",
+                guidance="Host mode is a break-glass path; provide the audited override token before graph execution.",
             )
 
         raise RunnerDetectionError(
             "No valid runner detected. Install/activate direnv+nix shell, or install nix, or install docker for nix fallback."
         )
+
+    def _preflight_selection(self, selection: RunnerSelection) -> None:
+        if selection.mode != DetectionMode.DOCKER_NIX:
+            return
+        try:
+            completed = subprocess.run(
+                ["docker", "info"],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=10,
+                check=False,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+            raise RunnerDetectionError(
+                f"Docker nix fallback is unavailable before graph execution: {exc}. {selection.guidance}",
+                selection=selection,
+            ) from exc
+        if completed.returncode != 0:
+            detail = (completed.stderr or completed.stdout or "docker info failed").strip()
+            raise RunnerDetectionError(
+                f"Docker nix fallback is unavailable before graph execution: {detail}. {selection.guidance}",
+                selection=selection,
+            )
 
     def _build(self, selection: RunnerSelection) -> Runner:
         if selection.mode == DetectionMode.DIRENV_NIX:

@@ -1,6 +1,8 @@
 # pyright: reportUnusedCallResult=false, reportImplicitOverride=false
 from __future__ import annotations
 
+import contextlib
+import io
 import os
 import stat
 import tempfile
@@ -62,9 +64,13 @@ class ApplyCliTests(unittest.TestCase):
             (tf_dir / "tofuplan").write_text("saved", encoding="utf-8")
 
             runner = ScriptedRunner(apply_failures=["permission denied"])
-            with patch("hermes_vps_app.cli.RunnerFactory.get", return_value=runner):
-                with self.assertRaises(RuntimeError):
-                    _ = main(["apply", "--repo-root", str(root), "--provider", "hetzner"])
+            stderr = io.StringIO()
+            with patch("hermes_vps_app.cli.RunnerFactory.get", return_value=runner), contextlib.redirect_stderr(stderr):
+                rc = main(["apply", "--repo-root", str(root), "--provider", "hetzner"])
+
+            self.assertEqual(rc, 40)
+            self.assertIn("category=command_failure", stderr.getvalue())
+            self.assertIn("action=tofu_apply", stderr.getvalue())
 
             commands = [r.command for r in runner.seen]
             self.assertEqual(commands, [["tofu", "-chdir=opentofu/providers/hetzner", "apply", "tofuplan"]])

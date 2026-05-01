@@ -5,7 +5,7 @@ import os
 import stat
 import tempfile
 import unittest
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import patch
@@ -172,6 +172,98 @@ class CompoundCliTests(unittest.TestCase):
         self.assertEqual(up_graph.actions["tofu_apply"].action_id, next(iter(apply_graph.actions.values())).action_id)
         self.assertEqual(set(deploy_graph.actions).intersection(set(bootstrap_graph.actions)), set(bootstrap_graph.actions))
         self.assertEqual(set(deploy_graph.actions).intersection(set(verify_graph.actions)), set(verify_graph.actions))
+
+    def test_public_operational_and_monitoring_graphs_declare_metadata_policy(self) -> None:
+        from hermes_vps_app.operational import build_graph, build_monitoring_graph
+
+        graph_names = ["init", "init-upgrade", "plan", "apply", "bootstrap", "verify", "destroy", "up", "deploy"]
+        graphs = [build_graph(name) for name in graph_names]
+        graphs.append(build_monitoring_graph())
+
+        for graph in graphs:
+            with self.subTest(graph=graph.name):
+                graph.validate()
+                self.assertGreater(len(graph.actions), 0)
+                for action in graph.actions.values():
+                    raw_policy = action.metadata.get("policy")
+                    if not isinstance(raw_policy, dict):
+                        self.fail(f"{action.action_id} missing policy metadata")
+                    policy: dict[object, object] = raw_policy
+                    self.assertEqual(policy.get("side_effect_level"), action.side_effect_level)
+                    self.assertIn(action.side_effect_level, {"none", "low", "high", "destructive"})
+                    if policy.get("command_backed") and action.side_effect_level != "none":
+                        self.assertIsNotNone(action.timeout_s, action.action_id)
+                        self.assertEqual(policy.get("timeout"), "bounded")
+                    if action.side_effect_level == "destructive":
+                        self.assertTrue(policy.get("approval_required"), action.action_id)
+
+    def test_policy_gate_rejects_missing_destructive_approval_metadata(self) -> None:
+        from hermes_control_core import ActionGraph
+        from hermes_vps_app.operational import build_graph
+
+        graph = build_graph("destroy")
+        action = graph.actions["tofu_destroy"]
+        broken = replace(action, metadata={"policy": {"side_effect_level": "destructive", "command_backed": True, "timeout": "bounded"}})
+        invalid_graph = ActionGraph(name="destroy", actions={"tofu_destroy": broken}, policy_gate_enabled=True)
+
+        with self.assertRaisesRegex(ValueError, "approval policy metadata"):
+            invalid_graph.validate()
+
+    def test_policy_gate_rejects_state_changing_command_without_timeout_intent(self) -> None:
+        from hermes_control_core import ActionDescriptor, ActionGraph
+        from hermes_vps_app.operational import build_graph
+
+        graph = build_graph("apply")
+        action = graph.actions["tofu_apply"]
+        broken_policy = {"side_effect_level": action.side_effect_level, "command_backed": True, "approval_required": False}
+        broken = replace(action, timeout_s=None, metadata={"policy": broken_policy})
+        invalid_graph = ActionGraph(name="apply", actions={"tofu_apply": broken}, policy_gate_enabled=True)
+
+        with self.assertRaisesRegex(ValueError, "missing timeout intent"):
+            invalid_graph.validate()
+
+        documented_exception = ActionDescriptor(
+            action_id="follow_logs",
+            label="follow logs",
+            side_effect_level="low",
+            timeout_s=None,
+            metadata={
+                "policy": {
+                    "side_effect_level": "low",
+                    "command_backed": True,
+                    "timeout": "no_timeout",
+                    "no_timeout_reason": "operator-requested non-destructive log tail",
+                    "approval_required": False,
+                }
+            },
+        )
+        ActionGraph(
+            name="non_destructive_no_timeout_exception",
+            actions={"follow_logs": documented_exception},
+            policy_gate_enabled=True,
+        ).validate()
+
+        destructive_exception = replace(
+            documented_exception,
+            action_id="destroy_logs",
+            side_effect_level="destructive",
+            metadata={
+                "policy": {
+                    "side_effect_level": "destructive",
+                    "command_backed": True,
+                    "timeout": "no_timeout",
+                    "no_timeout_reason": "not allowed for destructive actions",
+                    "approval_required": True,
+                }
+            },
+        )
+        invalid_destructive = ActionGraph(
+            name="destructive_no_timeout_exception",
+            actions={"destroy_logs": destructive_exception},
+            policy_gate_enabled=True,
+        )
+        with self.assertRaisesRegex(ValueError, "cannot opt out of timeout bounds"):
+            invalid_destructive.validate()
 
 
 if __name__ == "__main__":

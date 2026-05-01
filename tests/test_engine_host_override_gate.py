@@ -1,3 +1,4 @@
+# pyright: reportImplicitOverride=false, reportUnusedCallResult=false, reportUnusedParameter=false
 from __future__ import annotations
 
 import unittest
@@ -75,7 +76,9 @@ class EngineHostOverrideGateTests(unittest.TestCase):
         self.assertTrue(result.completed)
         self.assertEqual(len(audit.destructive_approvals), 1)
         self.assertTrue(audit.destructive_approvals[0].approved)
-        self.assertEqual(audit.destructive_approvals[0].token_used, "I-ACK-HOST-OVERRIDE")
+        self.assertIsNone(audit.destructive_approvals[0].token_used)
+        self.assertTrue(audit.destructive_approvals[0].details["token_provided"])
+        self.assertEqual(audit.destructive_approvals[0].details["runner_mode"], "host")
 
 
 if __name__ == "__main__":

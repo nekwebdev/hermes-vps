@@ -37,6 +37,9 @@ Debian 13 uses nftables natively. Choosing nftables removes an extra abstraction
 
 Post-exit recap is printed after Textual exits, so summary remains in terminal history.
 
+## Operator docs cutover guide
+For migrated control-panel workflows, use the operator guide at `docs/control-panel-operator-guide.md`. It documents configure, init/init-upgrade, plan/apply, bootstrap/verify, destroy, up/deploy, monitoring, JSON output, graph previews, runner modes, audit behavior, Just shim compatibility, and migration from Just recipes to Python entrypoints.
+
 ## Toolchain-isolated run/debug/test
 All Python execution must go through `scripts/toolchain.sh`.
 
@@ -103,6 +106,22 @@ Provider API token values still come from `.env`:
 OpenTofu working directory is derived from `PROVIDER`:
 - `opentofu/providers/hetzner`
 - `opentofu/providers/linode`
+
+## Headless CLI output and exit codes
+Migrated headless commands (`init`, `init-upgrade`, `plan`, `apply`, `destroy`, `bootstrap`, `verify`, `up`, `deploy`, `monitoring`) support `--output human` and `--output json`. Failures are classified consistently; human output includes the category and recovery guidance, while JSON output includes `error.category`, `error.exit_code`, and graph/action context when available.
+
+Deterministic exit-code contract:
+- `0` success
+- `10` usage/config error
+- `20` preflight failure
+- `30` runner unavailable
+- `40` command failure
+- `41` command timeout
+- `42` destructive approval denied
+- `43` host override denied
+- `50` output limit exceeded
+- `60` redaction error
+- `99` unexpected internal error
 
 ## End-to-end commands
 ```bash

@@ -67,6 +67,7 @@ class RunResult:
     finished_at: datetime
     runner_mode: RunnerMode
     redactions_applied: bool
+    output_truncated: bool = False
 
 
 class Runner(Protocol):

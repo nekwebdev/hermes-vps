@@ -1,6 +1,8 @@
 # pyright: reportUnusedCallResult=false, reportImplicitOverride=false, reportAny=false
 from __future__ import annotations
 
+import contextlib
+import io
 import os
 import stat
 import tempfile
@@ -210,20 +212,22 @@ class Issue11RegressionGateTests(unittest.TestCase):
             self._fixture(root)
             host_runner = RegressionRunner(mode="host")
 
-            with patch("hermes_vps_app.cli.RunnerFactory.get", return_value=host_runner):
-                with self.assertRaises(PermissionError) as denied:
-                    main(
-                        [
-                            "init",
-                            "--repo-root",
-                            str(root),
-                            "--provider",
-                            "hetzner",
-                            "--host-override-token",
-                            "BAD-HOST-TOKEN",
-                        ]
-                    )
-            self.assertNotIn("BAD-HOST-TOKEN", str(denied.exception))
+            stderr = io.StringIO()
+            with patch("hermes_vps_app.cli.RunnerFactory.get", return_value=host_runner), contextlib.redirect_stderr(stderr):
+                rc = main(
+                    [
+                        "init",
+                        "--repo-root",
+                        str(root),
+                        "--provider",
+                        "hetzner",
+                        "--host-override-token",
+                        "BAD-HOST-TOKEN",
+                    ]
+                )
+            self.assertEqual(rc, 43)
+            self.assertIn("category=host_override_denied", stderr.getvalue())
+            self.assertNotIn("BAD-HOST-TOKEN", stderr.getvalue())
 
         with self.assertRaisesRegex(Exception, "non-empty override_reason"):
             from hermes_control_core import RunnerFactory
@@ -234,11 +238,12 @@ class Issue11RegressionGateTests(unittest.TestCase):
         justfile = (Path(__file__).resolve().parents[1] / "Justfile").read_text(encoding="utf-8")
         for recipe in ("init", "init-upgrade", "plan", "apply", "bootstrap", "verify", "up", "deploy"):
             self.assertIn(f"{recipe} PROVIDER_ARG=\"\"", justfile)
-            self.assertIn(f"python3 -m hermes_vps_app.cli {recipe}", justfile)
+            self.assertIn(f"python3 -m hermes_vps_app.just_shim {recipe}", justfile)
+            self.assertNotIn(f"{recipe} PROVIDER_ARG=\"\": (_preflight PROVIDER_ARG)", justfile)
         self.assertIn('destroy CONFIRM="NO" PROVIDER_ARG=""', justfile)
-        self.assertIn("python3 -m hermes_vps_app.cli destroy", justfile)
-        self.assertIn("invalid provider override", justfile)
-        self.assertIn("exit 1", justfile)
+        self.assertIn("python3 -m hermes_vps_app.just_shim destroy", justfile)
+        self.assertIn("--confirm '{{ CONFIRM }}'", justfile)
+        self.assertIn("Legacy compatibility glue for non-migrated log/audit recipes only", justfile)
 
 
 if __name__ == "__main__":

@@ -1,6 +1,8 @@
 # pyright: reportUnusedCallResult=false, reportImplicitOverride=false
 from __future__ import annotations
 
+import contextlib
+import io
 import os
 import stat
 import tempfile
@@ -173,19 +175,21 @@ class VerifyCliTests(unittest.TestCase):
             _ = self._write_fixture(root)
             runner = VerifyRunner(fail_verify_ssh=True)
 
-            with patch("hermes_vps_app.cli.RunnerFactory.get", return_value=runner):
-                with self.assertRaises(RuntimeError) as exc:
-                    _ = main(["verify", "--repo-root", str(root), "--provider", "hetzner"])
+            stderr = io.StringIO()
+            with patch("hermes_vps_app.cli.RunnerFactory.get", return_value=runner), contextlib.redirect_stderr(stderr):
+                rc = main(["verify", "--repo-root", str(root), "--provider", "hetzner"])
 
-            message = str(exc.exception)
-            self.assertIn("verify_execute_remote", message)
-            self.assertIn("status=failed", message)
-            self.assertIn("repair_scope=rerun failed subtree", message)
+            message = stderr.getvalue()
+            self.assertEqual(rc, 40)
+            self.assertIn("category=command_failure", message)
+            self.assertIn("action=verify_execute_remote", message)
+            self.assertIn("repair_scope=failed subtree", message)
 
     def test_just_verify_recipe_delegates_to_python_entrypoint(self) -> None:
         justfile = Path(__file__).resolve().parents[1] / "Justfile"
         content = justfile.read_text(encoding="utf-8")
-        self.assertIn("python3 -m hermes_vps_app.cli verify --repo-root . --provider ${P}", content)
+        self.assertIn("python3 -m hermes_vps_app.just_shim verify --repo-root . --provider", content)
+        self.assertIn("hermes_vps_app.cli", content)
 
 
 if __name__ == "__main__":

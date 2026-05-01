@@ -1,6 +1,8 @@
-# pyright: reportUnusedCallResult=false, reportImplicitOverride=false
+# pyright: reportUnusedCallResult=false, reportImplicitOverride=false, reportAny=false
 from __future__ import annotations
 
+import contextlib
+import io
 import os
 import stat
 import tarfile
@@ -79,13 +81,52 @@ class DestroyCliTests(unittest.TestCase):
             self._fixture(root)
 
             runner = DestroyRunner()
-            with patch("hermes_vps_app.cli.RunnerFactory.get", return_value=runner):
-                with self.assertRaises(PermissionError):
-                    _ = main(["destroy", "--repo-root", str(root), "--provider", "hetzner"])
+            stderr = io.StringIO()
+            with patch("hermes_vps_app.cli.RunnerFactory.get", return_value=runner), contextlib.redirect_stderr(stderr):
+                rc = main(["destroy", "--repo-root", str(root), "--provider", "hetzner"])
+
+            self.assertEqual(rc, 42)
+            self.assertIn("category=destructive_approval_denied", stderr.getvalue())
+            self.assertNotIn("DESTROY:hetzner", stderr.getvalue())
 
             commands = [req.command for req in runner.seen]
             self.assertNotIn(["tofu", "-chdir=opentofu/providers/hetzner", "destroy"], commands)
             self.assertFalse((root / ".state-backups").exists())
+
+    def test_destroy_preview_json_includes_exact_non_secret_target_metadata(self) -> None:
+        import json
+
+        from hermes_vps_app.cli import main
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._fixture(root)
+            runner = DestroyRunner()
+            stdout = io.StringIO()
+
+            with patch("hermes_vps_app.cli.RunnerFactory.get", return_value=runner), contextlib.redirect_stdout(stdout):
+                rc = main(
+                    [
+                        "destroy",
+                        "--repo-root",
+                        str(root),
+                        "--provider",
+                        "hetzner",
+                        "--preview",
+                        "--output",
+                        "json",
+                    ]
+                )
+
+            self.assertEqual(rc, 0)
+            payload = json.loads(stdout.getvalue())
+            destroy = payload["destroy_preview"]
+            self.assertEqual(destroy["provider"], "hetzner")
+            self.assertTrue(destroy["tf_dir"].endswith("opentofu/providers/hetzner"))
+            self.assertTrue(destroy["backup_dir"].endswith(".state-backups/hetzner"))
+            self.assertEqual(destroy["state_file_count"], 2)
+            self.assertEqual(destroy["safe_outputs"]["public_ipv4"], "203.0.113.10")
+            self.assertNotIn("DESTROY:hetzner", stdout.getvalue())
 
     def test_headless_destroy_with_approval_runs_backup_and_destroy(self) -> None:
         from hermes_vps_app.cli import main
@@ -121,6 +162,72 @@ class DestroyCliTests(unittest.TestCase):
                 ["tofu", "-chdir=opentofu/providers/hetzner", "destroy"],
                 [req.command for req in runner.seen],
             )
+
+    def test_approved_destroy_json_reports_backup_and_runner_metadata(self) -> None:
+        import json
+
+        from hermes_vps_app.cli import main
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._fixture(root)
+            runner = DestroyRunner()
+            stdout = io.StringIO()
+
+            with patch("hermes_vps_app.cli.RunnerFactory.get", return_value=runner), contextlib.redirect_stdout(stdout):
+                rc = main(
+                    [
+                        "destroy",
+                        "--repo-root",
+                        str(root),
+                        "--provider",
+                        "hetzner",
+                        "--approve-destructive",
+                        "DESTROY:hetzner",
+                        "--output",
+                        "json",
+                    ]
+                )
+
+            self.assertEqual(rc, 0)
+            payload = json.loads(stdout.getvalue())
+            action = payload["actions"][0]
+            self.assertEqual(action["action_id"], "tofu_destroy")
+            self.assertEqual(action["status"], "succeeded")
+            self.assertEqual(action["runner_mode"], "direnv_nix")
+            self.assertEqual(action["result"]["backup"]["status"], "created")
+            self.assertTrue(action["result"]["backup"]["path"].endswith(".tar.gz"))
+            self.assertNotIn("DESTROY:hetzner", stdout.getvalue())
+
+    def test_approved_destroy_human_reports_backup_metadata(self) -> None:
+        from hermes_vps_app.cli import main
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._fixture(root)
+            runner = DestroyRunner()
+            stdout = io.StringIO()
+
+            with patch("hermes_vps_app.cli.RunnerFactory.get", return_value=runner), contextlib.redirect_stdout(stdout):
+                rc = main(
+                    [
+                        "destroy",
+                        "--repo-root",
+                        str(root),
+                        "--provider",
+                        "hetzner",
+                        "--approve-destructive",
+                        "DESTROY:hetzner",
+                    ]
+                )
+
+            output = stdout.getvalue()
+            self.assertEqual(rc, 0)
+            self.assertIn("tofu_destroy: succeeded", output)
+            self.assertIn("backup_status=created", output)
+            self.assertIn("backup_path=", output)
+            self.assertIn("runner=direnv_nix", output)
+            self.assertNotIn("DESTROY:hetzner", output)
 
     def test_approval_audit_has_required_metadata_and_canonical_token_only(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

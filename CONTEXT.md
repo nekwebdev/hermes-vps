@@ -26,6 +26,7 @@
 - DAG v1 topology policy: static graphs with small conditional branches; no general runtime graph expansion in v1.
 - packaging boundary: immediate split into two packages in same repo: `hermes_control_core` (reusable framework + standard panels) and `hermes_vps_app` (repo-specific nodes/adapters/assets).
 - plugin API lifecycle: provisional during v1 buildout; iterate fast before freezing stable API.
+- stable public plugin API HITL decision: deferred after v2 aggregate gate; no stable public plugin API is declared until real external plugin demand, another hardening cycle, and a separate API design issue exist.
 - plugin compatibility contract: plugins declare supported core version range; incompatible core/plugin combinations fail fast at load time.
 - runner policy: `HostRunner` disabled by default.
 - host override policy: requires both explicit enable flag and non-empty `override_reason` recorded in audit metadata.
@@ -53,6 +54,7 @@
 - migration strategy: staged shim cutover from Justfile to panel commands.
 - shim policy: Justfile remains as thin compatibility layer delegating to new app entrypoints during transition.
 - removal criteria: delete Justfile only after full command-coverage parity and documentation cutover are complete.
+- Justfile removal HITL decision: deferred after v2 aggregate gate; keep Justfile as thin compatibility shim through at least one real operator cycle, then require a separate HITL checkpoint and implementation issue before deletion.
 - implementation sequencing preference: start with runner detection/lock module, then perform package split, then migrate panel flows.
 - runner lock scope: per-launch only (fresh detection on each new app run); never persisted across launches.
 - environment readiness policy: if Docker fallback is selected but Docker is missing, show guided install steps and exit immediately; no panel execution before dev environment is valid.

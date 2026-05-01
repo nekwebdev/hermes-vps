@@ -1,6 +1,8 @@
 # pyright: reportUnusedCallResult=false, reportImplicitOverride=false
 from __future__ import annotations
 
+import contextlib
+import io
 import os
 import stat
 import tempfile
@@ -230,20 +232,24 @@ class InitCliTests(unittest.TestCase):
             (root / "opentofu/providers/hetzner").mkdir(parents=True)
 
             host_stub = RunnerStub(mode="host")
-            with patch("hermes_vps_app.cli.RunnerFactory.get", return_value=host_stub):
-                with self.assertRaises(PermissionError):
-                    _ = main(
-                        [
-                            "init",
-                            "--repo-root",
-                            str(root),
-                            "--provider",
-                            "hetzner",
-                            "--allow-host-override",
-                            "--override-reason",
-                            "break-glass",
-                        ]
-                    )
+            stderr = io.StringIO()
+            with patch("hermes_vps_app.cli.RunnerFactory.get", return_value=host_stub), contextlib.redirect_stderr(stderr):
+                rc = main(
+                    [
+                        "init",
+                        "--repo-root",
+                        str(root),
+                        "--provider",
+                        "hetzner",
+                        "--allow-host-override",
+                        "--override-reason",
+                        "break-glass",
+                    ]
+                )
+
+            self.assertEqual(rc, 43)
+            self.assertIn("category=host_override_denied", stderr.getvalue())
+            self.assertNotIn("I-ACK-HOST-OVERRIDE", stderr.getvalue())
 
     def test_host_runner_succeeds_with_required_override_fields_and_token(self) -> None:
         from hermes_vps_app.cli import main
@@ -275,7 +281,6 @@ class InitCliTests(unittest.TestCase):
 
     def test_host_runner_disabled_by_default_without_explicit_enablement(self) -> None:
         from hermes_vps_app.cli import main
-        from hermes_control_core import RunnerDetectionError
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -283,11 +288,14 @@ class InitCliTests(unittest.TestCase):
             os.chmod(root / ".env", stat.S_IRUSR | stat.S_IWUSR)
             (root / "opentofu/providers/hetzner").mkdir(parents=True)
 
+            stderr = io.StringIO()
             with patch("hermes_control_core.runner.RunnerFactory._is_direnv_attached_nix_shell", return_value=False), patch(
                 "hermes_control_core.runner.shutil.which", return_value=None
-            ):
-                with self.assertRaises(RunnerDetectionError):
-                    _ = main(["init", "--repo-root", str(root), "--provider", "hetzner"])
+            ), contextlib.redirect_stderr(stderr):
+                rc = main(["init", "--repo-root", str(root), "--provider", "hetzner"])
+
+            self.assertEqual(rc, 30)
+            self.assertIn("category=runner_unavailable", stderr.getvalue())
 
 
 if __name__ == "__main__":

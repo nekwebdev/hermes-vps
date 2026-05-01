@@ -6,10 +6,10 @@ import re
 import shutil
 import stat
 import tarfile
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from hermes_control_core import (
     ActionDescriptor,
@@ -21,9 +21,70 @@ from hermes_control_core import (
     Runner,
     SessionAuditLog,
 )
+from hermes_control_core.interfaces import SideEffectLevel
 
 VALID_PROVIDERS = {"hetzner", "linode"}
 OAUTH_PROVIDERS = {"openai-codex", "nous", "qwen-oauth", "google-gemini-cli"}
+COMMAND_TIMEOUT_S = 900.0
+REMOTE_COMMAND_TIMEOUT_S = 1800.0
+
+
+def _policy(
+    side_effect_level: str,
+    *,
+    command_backed: bool = True,
+    timeout: str = "bounded",
+    approval_required: bool = False,
+) -> dict[str, Any]:
+    policy: dict[str, Any] = {
+        "side_effect_level": side_effect_level,
+        "command_backed": command_backed,
+        "timeout": timeout,
+        "approval_required": approval_required,
+    }
+    metadata: dict[str, Any] = {"policy": policy}
+    if approval_required:
+        metadata["approval_required"] = True
+    return metadata
+
+
+def _action(
+    action_id: str,
+    label: str,
+    side_effect_level: SideEffectLevel,
+    *,
+    deps: list[str] | None = None,
+    timeout_s: float | None = COMMAND_TIMEOUT_S,
+    approval_required: bool = False,
+    command_backed: bool = True,
+    repair_hint: str | None = None,
+) -> ActionDescriptor:
+    return ActionDescriptor(
+        action_id=action_id,
+        label=label,
+        deps=list(deps or []),
+        side_effect_level=side_effect_level,
+        timeout_s=timeout_s,
+        repair_hint=repair_hint,
+        metadata=_policy(
+            side_effect_level,
+            command_backed=command_backed,
+            timeout="bounded" if timeout_s is not None else "no_timeout",
+            approval_required=approval_required,
+        ),
+    )
+
+
+def _monitoring_action(action_id: str, label: str, *, deps: list[str] | None = None) -> ActionDescriptor:
+    return _action(
+        action_id,
+        label,
+        "none",
+        deps=deps,
+        timeout_s=None,
+        command_backed=False,
+        approval_required=False,
+    )
 
 
 @dataclass(frozen=True)
@@ -265,12 +326,26 @@ class OperationalActionHandler:
         if action.action_id == "tofu_apply":
             return self._run_apply(runner, repo_root=repo_root, provider=provider)
         if action.action_id == "tofu_destroy":
-            return self._run_checked(
+            result = self._run_checked(
                 runner,
                 repo_root=repo_root,
                 provider=provider,
                 command=["tofu", f"-chdir=opentofu/providers/{provider}", "destroy"],
             )
+            backup = context.get("destroy_backup")
+            if isinstance(backup, dict):
+                result["backup"] = dict(cast(dict[str, object], backup))
+            preview = context.get("destroy_preview")
+            if isinstance(preview, dict):
+                preview_payload = cast(dict[str, object], preview)
+                result["target_summary"] = {
+                    "provider": preview_payload.get("provider"),
+                    "tf_dir": preview_payload.get("tf_dir"),
+                    "state_file_count": preview_payload.get("state_file_count"),
+                    "state_files": preview_payload.get("state_files", []),
+                    "safe_outputs": preview_payload.get("safe_outputs", {}),
+                }
+            return result
         if action.action_id == "bootstrap_resolve_target":
             return self._resolve_bootstrap_target(runner, context=context)
         if action.action_id == "bootstrap_execute_remote":
@@ -288,10 +363,22 @@ class OperationalActionHandler:
             env={"TF_VAR_cloud_provider": provider},
             shell=False,
         )
-        result = runner.run(req)
+        try:
+            result = runner.run(req)
+        except CommandFailed as exc:
+            raise exc
         if result.exit_code != 0:
-            raise CommandFailed(f"command failed with exit code {result.exit_code}: {' '.join(command)}")
-        return {"exit_code": result.exit_code, "runner_mode": result.runner_mode}
+            raise CommandFailed(f"command failed with exit code {result.exit_code}: {' '.join(command)}", result)
+        return {
+            "kind": "command",
+            "command": command,
+            "exit_code": result.exit_code,
+            "stdout": result.stdout,
+            "stderr": result.stderr,
+            "output_truncated": result.output_truncated,
+            "runner_mode": result.runner_mode,
+            "redactions_applied": result.redactions_applied,
+        }
 
     def _run_apply(self, runner: Runner, *, repo_root: Path, provider: str) -> dict[str, Any]:
         plan_path = repo_root / "opentofu" / "providers" / provider / "tofuplan"
@@ -529,35 +616,40 @@ class OperationalActionHandler:
 
 def _action_definitions() -> dict[str, ActionDescriptor]:
     return {
-        "tofu_init": ActionDescriptor(action_id="tofu_init", label="tofu init", side_effect_level="low"),
-        "tofu_init_upgrade": ActionDescriptor(
-            action_id="tofu_init_upgrade", label="tofu init -upgrade", side_effect_level="low"
+        "tofu_init": _action("tofu_init", "tofu init", "low"),
+        "tofu_init_upgrade": _action("tofu_init_upgrade", "tofu init -upgrade", "low"),
+        "tofu_plan": _action("tofu_plan", "tofu plan", "low"),
+        "tofu_apply": _action("tofu_apply", "tofu apply", "high"),
+        "tofu_destroy": _action(
+            "tofu_destroy",
+            "tofu destroy",
+            "destructive",
+            approval_required=True,
         ),
-        "tofu_plan": ActionDescriptor(action_id="tofu_plan", label="tofu plan", side_effect_level="low"),
-        "tofu_apply": ActionDescriptor(action_id="tofu_apply", label="tofu apply", side_effect_level="low"),
-        "tofu_destroy": ActionDescriptor(action_id="tofu_destroy", label="tofu destroy", side_effect_level="destructive"),
-        "bootstrap_resolve_target": ActionDescriptor(
-            action_id="bootstrap_resolve_target",
-            label="resolve bootstrap target",
-            side_effect_level="low",
+        "bootstrap_resolve_target": _action(
+            "bootstrap_resolve_target",
+            "resolve bootstrap target",
+            "low",
         ),
-        "bootstrap_execute_remote": ActionDescriptor(
-            action_id="bootstrap_execute_remote",
-            label="execute bootstrap remote",
-            side_effect_level="high",
+        "bootstrap_execute_remote": _action(
+            "bootstrap_execute_remote",
+            "execute bootstrap remote",
+            "high",
             deps=["bootstrap_resolve_target"],
+            timeout_s=REMOTE_COMMAND_TIMEOUT_S,
         ),
-        "verify_resolve_target": ActionDescriptor(
-            action_id="verify_resolve_target",
-            label="resolve verify target",
-            side_effect_level="low",
+        "verify_resolve_target": _action(
+            "verify_resolve_target",
+            "resolve verify target",
+            "low",
             repair_hint="rerun failed node",
         ),
-        "verify_execute_remote": ActionDescriptor(
-            action_id="verify_execute_remote",
-            label="execute verify remote",
-            side_effect_level="high",
+        "verify_execute_remote": _action(
+            "verify_execute_remote",
+            "execute verify remote",
+            "high",
             deps=["verify_resolve_target"],
+            timeout_s=REMOTE_COMMAND_TIMEOUT_S,
             repair_hint="rerun failed subtree",
         ),
     }
@@ -592,48 +684,24 @@ def build_graph(action: str) -> ActionGraph:
         actions[aid] = definitions[aid]
 
     if action == "up":
-        actions["tofu_plan"] = ActionDescriptor(
-            action_id="tofu_plan", label="tofu plan", side_effect_level="low", deps=["tofu_init"]
-        )
-        actions["tofu_apply"] = ActionDescriptor(
-            action_id="tofu_apply", label="tofu apply", side_effect_level="low", deps=["tofu_plan"]
-        )
+        actions["tofu_plan"] = replace(definitions["tofu_plan"], deps=["tofu_init"])
+        actions["tofu_apply"] = replace(definitions["tofu_apply"], deps=["tofu_plan"])
 
     if action == "deploy":
-        actions["tofu_plan"] = ActionDescriptor(
-            action_id="tofu_plan", label="tofu plan", side_effect_level="low", deps=["tofu_init"]
+        actions["tofu_plan"] = replace(definitions["tofu_plan"], deps=["tofu_init"])
+        actions["tofu_apply"] = replace(definitions["tofu_apply"], deps=["tofu_plan"])
+        actions["bootstrap_resolve_target"] = replace(definitions["bootstrap_resolve_target"], deps=["tofu_apply"])
+        actions["bootstrap_execute_remote"] = replace(
+            definitions["bootstrap_execute_remote"], deps=["bootstrap_resolve_target"]
         )
-        actions["tofu_apply"] = ActionDescriptor(
-            action_id="tofu_apply", label="tofu apply", side_effect_level="low", deps=["tofu_plan"]
+        actions["verify_resolve_target"] = replace(
+            definitions["verify_resolve_target"], deps=["bootstrap_execute_remote"]
         )
-        actions["bootstrap_resolve_target"] = ActionDescriptor(
-            action_id="bootstrap_resolve_target",
-            label="resolve bootstrap target",
-            side_effect_level="low",
-            deps=["tofu_apply"],
-        )
-        actions["bootstrap_execute_remote"] = ActionDescriptor(
-            action_id="bootstrap_execute_remote",
-            label="execute bootstrap remote",
-            side_effect_level="high",
-            deps=["bootstrap_resolve_target"],
-        )
-        actions["verify_resolve_target"] = ActionDescriptor(
-            action_id="verify_resolve_target",
-            label="resolve verify target",
-            side_effect_level="low",
-            deps=["bootstrap_execute_remote"],
-            repair_hint="rerun failed node",
-        )
-        actions["verify_execute_remote"] = ActionDescriptor(
-            action_id="verify_execute_remote",
-            label="execute verify remote",
-            side_effect_level="high",
-            deps=["verify_resolve_target"],
-            repair_hint="rerun failed subtree",
-        )
+        actions["verify_execute_remote"] = replace(definitions["verify_execute_remote"], deps=["verify_resolve_target"])
 
-    return ActionGraph(name=action, actions=actions)
+    graph = ActionGraph(name=action, actions=actions, policy_gate_enabled=True)
+    graph.validate()
+    return graph
 
 
 def build_init_graph() -> ActionGraph:
@@ -655,6 +723,7 @@ def run_operational_graph(
     repo_root: Path,
     provider_override: str | None,
     host_override_token: str | None = None,
+    override_reason: str | None = None,
     approve_destructive: str | None = None,
     confirmation_mode: str = "headless",
     audit_log: SessionAuditLog | None = None,
@@ -663,6 +732,9 @@ def run_operational_graph(
     selection = validate_init_environment(repo_root=repo_root, provider=provider)
 
     context: dict[str, Any] = {"provider": provider, "tf_dir": str(selection.tf_dir), "repo_root": str(repo_root)}
+    override_reason_clean = (override_reason or "").strip()
+    if override_reason_clean:
+        context["override_reason"] = override_reason_clean
     if action in {"bootstrap", "verify", "deploy"}:
         context["bootstrap_config"] = validate_bootstrap_environment(repo_root=repo_root, provider=provider)
 
@@ -705,6 +777,7 @@ def run_operational_graph(
         if not approved:
             raise PermissionError("destructive approval required: pass --approve-destructive DESTROY:<provider>")
         backup_path, backup_status = _backup_state_files(preview=preview)
+        context["destroy_backup"] = {"status": backup_status, "path": backup_path}
         if audit_log is not None and audit_log.destructive_approvals:
             latest = audit_log.destructive_approvals[-1]
             latest.details["backup_path"] = backup_path
@@ -728,6 +801,7 @@ def execute_init_graph(
     repo_root: Path,
     provider_override: str | None,
     host_override_token: str | None = None,
+    override_reason: str | None = None,
 ) -> EngineResult:
     return run_operational_graph(
         action="init",
@@ -735,6 +809,7 @@ def execute_init_graph(
         repo_root=repo_root,
         provider_override=provider_override,
         host_override_token=host_override_token,
+        override_reason=override_reason,
     )
 
 
@@ -756,43 +831,40 @@ def run_init_graph(
 
 
 def build_monitoring_graph() -> ActionGraph:
-    return ActionGraph(
+    graph = ActionGraph(
         name="monitoring-local-readiness",
+        policy_gate_enabled=True,
         actions={
-            "runner_toolchain_readiness": ActionDescriptor(
-                action_id="runner_toolchain_readiness",
-                label="local runner/toolchain readiness",
-                side_effect_level="none",
+            "runner_toolchain_readiness": _monitoring_action(
+                "runner_toolchain_readiness",
+                "local runner/toolchain readiness",
             ),
-            "env_file_posture": ActionDescriptor(
-                action_id="env_file_posture",
-                label=".env/.env.example posture",
-                side_effect_level="none",
+            "env_file_posture": _monitoring_action(
+                "env_file_posture",
+                ".env/.env.example posture",
             ),
-            "provider_resolution": ActionDescriptor(
-                action_id="provider_resolution",
-                label="provider selection resolution",
-                side_effect_level="none",
+            "provider_resolution": _monitoring_action(
+                "provider_resolution",
+                "provider selection resolution",
             ),
-            "provider_directory": ActionDescriptor(
-                action_id="provider_directory",
-                label="provider directory existence",
-                side_effect_level="none",
+            "provider_directory": _monitoring_action(
+                "provider_directory",
+                "provider directory existence",
                 deps=["provider_resolution"],
             ),
-            "local_command_availability": ActionDescriptor(
-                action_id="local_command_availability",
-                label="local command availability",
-                side_effect_level="none",
+            "local_command_availability": _monitoring_action(
+                "local_command_availability",
+                "local command availability",
             ),
-            "saved_plan_summary": ActionDescriptor(
-                action_id="saved_plan_summary",
-                label="saved plan presence/staleness summary",
-                side_effect_level="none",
+            "saved_plan_summary": _monitoring_action(
+                "saved_plan_summary",
+                "saved plan presence/staleness summary",
                 deps=["provider_resolution"],
             ),
         },
     )
+    graph.validate()
+    return graph
 
 
 def _monitoring_check(probe_id: str, severity: str, summary: str, evidence: dict[str, Any]) -> dict[str, Any]:

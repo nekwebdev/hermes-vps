@@ -1,6 +1,8 @@
 # pyright: reportUnusedCallResult=false, reportImplicitOverride=false
 from __future__ import annotations
 
+import contextlib
+import io
 import os
 import stat
 import tempfile
@@ -140,11 +142,14 @@ class BootstrapCliTests(unittest.TestCase):
             _ = self._write_valid_bootstrap_fixture(root)
 
             runner = BootstrapRunner(fail_on="rsync")
-            with patch("hermes_vps_app.cli.RunnerFactory.get", return_value=runner):
-                with self.assertRaises(RuntimeError) as exc:
-                    _ = main(["bootstrap", "--repo-root", str(root), "--provider", "hetzner"])
+            stderr = io.StringIO()
+            with patch("hermes_vps_app.cli.RunnerFactory.get", return_value=runner), contextlib.redirect_stderr(stderr):
+                rc = main(["bootstrap", "--repo-root", str(root), "--provider", "hetzner"])
 
-            message = str(exc.exception)
+            message = stderr.getvalue()
+            self.assertEqual(rc, 40)
+            self.assertIn("category=command_failure", message)
+            self.assertIn("action=bootstrap_execute_remote", message)
             self.assertNotIn("super-secret-hermes-key", message)
             self.assertNotIn("super-secret-telegram-token", message)
             self.assertFalse((root / "bootstrap" / "runtime").exists())

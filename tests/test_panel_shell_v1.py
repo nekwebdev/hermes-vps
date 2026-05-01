@@ -31,16 +31,45 @@ class RunnerStub(Runner):
 
 
 class PanelShellV1Tests(unittest.TestCase):
-    def test_shell_navigation_separates_config_and_operational_with_state_change_label(self) -> None:
+    def test_shell_navigation_separates_glossary_panel_flows(self) -> None:
         from hermes_vps_app.panel_shell import ControlPanelShell
 
         shell = ControlPanelShell()
         navigation = shell.navigation()
 
-        self.assertIn("config", navigation)
-        self.assertIn("operational", navigation)
-        self.assertIn("read-only", navigation["config"].lower())
-        self.assertIn("state-changing", navigation["operational"].lower())
+        self.assertEqual(
+            set(navigation),
+            {"config", "maintenance", "monitoring", "deploy/bootstrap"},
+        )
+        self.assertIn("configuration", navigation["config"].lower())
+        self.assertIn("maintenance", navigation["maintenance"].lower())
+        self.assertIn("monitoring", navigation["monitoring"].lower())
+        self.assertIn("deploy/bootstrap", navigation["deploy/bootstrap"].lower())
+        self.assertIn("state-changing", navigation["maintenance"].lower())
+        self.assertIn("state-changing", navigation["deploy/bootstrap"].lower())
+        self.assertIn("read-only", navigation["monitoring"].lower())
+        self.assertIn("on-demand", navigation["monitoring"].lower())
+
+    def test_shell_action_catalog_marks_state_changing_and_read_only_flows(self) -> None:
+        from hermes_vps_app.panel_shell import ControlPanelShell
+
+        shell = ControlPanelShell()
+
+        maintenance = shell.maintenance_actions()
+        deploy_bootstrap = shell.deploy_bootstrap_actions()
+        monitoring = shell.monitoring_actions()
+
+        self.assertTrue(maintenance)
+        self.assertTrue(deploy_bootstrap)
+        self.assertTrue(monitoring)
+        self.assertTrue(all(action.panel == "maintenance" for action in maintenance))
+        self.assertTrue(all(action.panel == "deploy/bootstrap" for action in deploy_bootstrap))
+        self.assertTrue(all(action.state_change_label == "state-changing" for action in maintenance + deploy_bootstrap))
+        self.assertTrue(any(action.side_effect_level == "high" for action in deploy_bootstrap))
+        self.assertTrue(all(action.panel == "monitoring" for action in monitoring))
+        self.assertTrue(all(action.state_change_label == "read-only" for action in monitoring))
+        self.assertTrue(all(action.side_effect_level == "none" for action in monitoring))
+        self.assertTrue(all(action.execution_mode == "on-demand" for action in monitoring))
 
     def test_shell_can_launch_config_flow_and_init_from_operational_panel(self) -> None:
         from hermes_vps_app.panel_shell import ControlPanelShell
@@ -121,10 +150,15 @@ class PanelShellV1Tests(unittest.TestCase):
             )
 
         self.assertEqual(payload["workflow"], "deploy")
+        self.assertEqual(payload["graph"], {"id": "deploy"})
         self.assertTrue(payload["completed"])
+        self.assertIn("redactions", payload)
         self.assertIn("actions", payload)
-        actions = cast(list[dict[str, str]], payload["actions"])
+        actions = cast(list[dict[str, object]], payload["actions"])
         self.assertTrue(any(action["action_id"] == "bootstrap_execute_remote" for action in actions))
+        bootstrap_action = next(action for action in actions if action["action_id"] == "bootstrap_execute_remote")
+        self.assertIn("bootstrap", str(bootstrap_action["label"]).lower())
+        self.assertEqual(bootstrap_action["status"], "succeeded")
 
 
 if __name__ == "__main__":

@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from hermes_control_core.actions import sanitize_for_schema
 from hermes_control_core.interfaces import RunnerMode
 
 
@@ -12,6 +13,8 @@ from hermes_control_core.interfaces import RunnerMode
 class RunnerSelectionAudit:
     mode: RunnerMode
     reason: str
+    lock_scope: str = "per-launch"
+    guidance: str = "Runner is locked for this process launch."
     detected_at: datetime = field(default_factory=lambda: datetime.now(UTC))
 
 
@@ -44,8 +47,19 @@ class SessionAuditLog:
     redactions: list[RedactionAudit] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
 
-    def set_runner_selection(self, mode: RunnerMode, reason: str) -> None:
-        self.runner_selection = RunnerSelectionAudit(mode=mode, reason=reason)
+    def set_runner_selection(
+        self,
+        mode: RunnerMode,
+        reason: str,
+        lock_scope: str = "per-launch",
+        guidance: str = "Runner is locked for this process launch.",
+    ) -> None:
+        self.runner_selection = RunnerSelectionAudit(
+            mode=mode,
+            reason=reason,
+            lock_scope=lock_scope,
+            guidance=guidance,
+        )
 
     def add_destructive_approval(
         self,
@@ -90,17 +104,19 @@ class SessionAuditLog:
             if self.runner_selection is None
             else {
                 "mode": self.runner_selection.mode,
-                "reason": self.runner_selection.reason,
+                "reason": sanitize_for_schema(self.runner_selection.reason),
+                "lock_scope": self.runner_selection.lock_scope,
+                "guidance": self.runner_selection.guidance,
                 "detected_at": self.runner_selection.detected_at.isoformat(),
             },
             "destructive_approvals": [
                 {
                     "action_id": item.action_id,
                     "approved": item.approved,
-                    "approved_by": item.approved_by,
-                    "token_used": item.token_used,
+                    "approved_by": sanitize_for_schema(item.approved_by),
+                    "token_used": sanitize_for_schema(item.token_used),
                     "flag_used": item.flag_used,
-                    "details": dict(item.details),
+                    "details": sanitize_for_schema(item.details),
                     "approved_at": item.approved_at.isoformat(),
                 }
                 for item in self.destructive_approvals
@@ -109,10 +125,10 @@ class SessionAuditLog:
                 {
                     "action_id": item.action_id,
                     "redactions_applied": item.redactions_applied,
-                    "redaction_errors": list(item.redaction_errors),
+                    "redaction_errors": sanitize_for_schema(item.redaction_errors),
                     "recorded_at": item.recorded_at.isoformat(),
                 }
                 for item in self.redactions
             ],
-            "metadata": dict(self.metadata),
+            "metadata": sanitize_for_schema(self.metadata),
         }

@@ -12,6 +12,9 @@ PROVIDER := env("TF_VAR_cloud_provider", "")
 # Show recipe list with descriptions
 @default:
     @just --list
+# Legacy compatibility glue for non-migrated log/audit recipes only.
+# Migrated operational workflows below delegate provider and preflight validation
+# through hermes_vps_app.just_shim into hermes_vps_app.cli.
 # Validate provider selection, .env safety, and provider directory prerequisites
 @_preflight PROVIDER_ARG="":
     @set -euo pipefail; \
@@ -51,70 +54,35 @@ configure:
     TOOLCHAIN_QUIET=1 ./scripts/toolchain.sh "python3 -m scripts.configure_tui"
 
 # Initialize OpenTofu in the selected provider directory
-init PROVIDER_ARG="": (_preflight PROVIDER_ARG)
-    @set -euo pipefail; \
-    P='{{ PROVIDER }}'; \
-    if [[ -z "$P" ]]; then P="${TF_VAR_cloud_provider:-}"; fi; \
-    if [[ -n '{{ PROVIDER_ARG }}' ]]; then P='{{ PROVIDER_ARG }}'; P="${P#PROVIDER=}"; fi; \
-    ./scripts/toolchain.sh "python3 -m hermes_vps_app.cli init --repo-root . --provider ${P}"
+init PROVIDER_ARG="":
+    @./scripts/toolchain.sh "python3 -m hermes_vps_app.just_shim init --repo-root . --provider '{{ PROVIDER }}' --provider-arg '{{ PROVIDER_ARG }}'"
 
 # Initialize OpenTofu and upgrade provider/module plugins
-init-upgrade PROVIDER_ARG="": (_preflight PROVIDER_ARG)
-    @set -euo pipefail; \
-    P='{{ PROVIDER }}'; \
-    if [[ -z "$P" ]]; then P="${TF_VAR_cloud_provider:-}"; fi; \
-    if [[ -n '{{ PROVIDER_ARG }}' ]]; then P='{{ PROVIDER_ARG }}'; P="${P#PROVIDER=}"; fi; \
-    ./scripts/toolchain.sh "python3 -m hermes_vps_app.cli init-upgrade --repo-root . --provider ${P}"
+init-upgrade PROVIDER_ARG="":
+    @./scripts/toolchain.sh "python3 -m hermes_vps_app.just_shim init-upgrade --repo-root . --provider '{{ PROVIDER }}' --provider-arg '{{ PROVIDER_ARG }}'"
 
 # Create and save OpenTofu execution plan (tofuplan)
-plan PROVIDER_ARG="": (_preflight PROVIDER_ARG)
-    @set -euo pipefail; \
-    P='{{ PROVIDER }}'; \
-    if [[ -z "$P" ]]; then P="${TF_VAR_cloud_provider:-}"; fi; \
-    if [[ -n '{{ PROVIDER_ARG }}' ]]; then P='{{ PROVIDER_ARG }}'; P="${P#PROVIDER=}"; fi; \
-    ./scripts/toolchain.sh "python3 -m hermes_vps_app.cli plan --repo-root . --provider ${P}"
+plan PROVIDER_ARG="":
+    @./scripts/toolchain.sh "python3 -m hermes_vps_app.just_shim plan --repo-root . --provider '{{ PROVIDER }}' --provider-arg '{{ PROVIDER_ARG }}'"
 
 # Apply tofuplan (regenerates plan automatically when stale/missing)
-apply PROVIDER_ARG="": (_preflight PROVIDER_ARG)
-    @set -euo pipefail; \
-    P='{{ PROVIDER }}'; \
-    if [[ -z "$P" ]]; then P="${TF_VAR_cloud_provider:-}"; fi; \
-    if [[ -n '{{ PROVIDER_ARG }}' ]]; then P='{{ PROVIDER_ARG }}'; P="${P#PROVIDER=}"; fi; \
-    ./scripts/toolchain.sh "python3 -m hermes_vps_app.cli apply --repo-root . --provider ${P}"
+apply PROVIDER_ARG="":
+    @./scripts/toolchain.sh "python3 -m hermes_vps_app.just_shim apply --repo-root . --provider '{{ PROVIDER }}' --provider-arg '{{ PROVIDER_ARG }}'"
 
 # Destroy managed infrastructure (requires CONFIRM=YES)
-destroy CONFIRM="NO" PROVIDER_ARG="": (_preflight PROVIDER_ARG)
-    @set -euo pipefail; \
-    C='{{ CONFIRM }}'; \
-    if [[ "$C" == CONFIRM=* ]]; then C="${C#CONFIRM=}"; fi; \
-    if [[ "$C" != 'YES' ]]; then \
-      echo 'WARNING: destroy is destructive and cannot be undone.'; \
-      echo 'Refusing to continue. Re-run with: just destroy CONFIRM=YES [PROVIDER=linode]'; \
-      exit 1; \
-    fi; \
-    P='{{ PROVIDER }}'; \
-    if [[ -z "$P" ]]; then P="${TF_VAR_cloud_provider:-}"; fi; \
-    if [[ -n '{{ PROVIDER_ARG }}' ]]; then P='{{ PROVIDER_ARG }}'; P="${P#PROVIDER=}"; fi; \
-    ./scripts/toolchain.sh "python3 -m hermes_vps_app.cli destroy --repo-root . --provider ${P} --approve-destructive DESTROY:${P}"
+destroy CONFIRM="NO" PROVIDER_ARG="":
+    @./scripts/toolchain.sh "python3 -m hermes_vps_app.just_shim destroy --repo-root . --provider '{{ PROVIDER }}' --provider-arg '{{ PROVIDER_ARG }}' --confirm '{{ CONFIRM }}'"
 
 # Compatibility alias for destroy
 down CONFIRM="NO" PROVIDER_ARG="":
     @just destroy CONFIRM={{ CONFIRM }} PROVIDER_ARG={{ PROVIDER_ARG }}
 
 # Run post-provision bootstrap scripts over SSH
-bootstrap PROVIDER_ARG="": (_preflight PROVIDER_ARG)
-    @set -euo pipefail; \
-    P='{{ PROVIDER }}'; \
-    if [[ -z "$P" ]]; then P="${TF_VAR_cloud_provider:-}"; fi; \
-    if [[ -n '{{ PROVIDER_ARG }}' ]]; then P='{{ PROVIDER_ARG }}'; P="${P#PROVIDER=}"; fi; \
-    ./scripts/toolchain.sh "python3 -m hermes_vps_app.cli bootstrap --repo-root . --provider ${P}"
+bootstrap PROVIDER_ARG="":
+    @./scripts/toolchain.sh "python3 -m hermes_vps_app.just_shim bootstrap --repo-root . --provider '{{ PROVIDER }}' --provider-arg '{{ PROVIDER_ARG }}'"
 # Run remote verification checks on the provisioned server
-verify PROVIDER_ARG="": (_preflight PROVIDER_ARG)
-    @set -euo pipefail; \
-    P='{{ PROVIDER }}'; \
-    if [[ -z "$P" ]]; then P="${TF_VAR_cloud_provider:-}"; fi; \
-    if [[ -n '{{ PROVIDER_ARG }}' ]]; then P='{{ PROVIDER_ARG }}'; P="${P#PROVIDER=}"; fi; \
-    ./scripts/toolchain.sh "python3 -m hermes_vps_app.cli verify --repo-root . --provider ${P}"
+verify PROVIDER_ARG="":
+    @./scripts/toolchain.sh "python3 -m hermes_vps_app.just_shim verify --repo-root . --provider '{{ PROVIDER }}' --provider-arg '{{ PROVIDER_ARG }}'"
 
 # Show recent journal logs from one service or all core services
 logs SERVICE="all" PROVIDER_ARG="": (_preflight PROVIDER_ARG)
@@ -176,17 +144,9 @@ hardening-audit PROVIDER_ARG="": (_preflight PROVIDER_ARG)
       "sudo sshd -t && sudo nft list ruleset && sudo fail2ban-client status && sudo sysctl -n net.ipv4.tcp_syncookies >/dev/null"
 
 # Convenience alias: init + plan + apply
-up PROVIDER_ARG="": (_preflight PROVIDER_ARG)
-    @set -euo pipefail; \
-    P='{{ PROVIDER }}'; \
-    if [[ -z "$P" ]]; then P="${TF_VAR_cloud_provider:-}"; fi; \
-    if [[ -n '{{ PROVIDER_ARG }}' ]]; then P='{{ PROVIDER_ARG }}'; P="${P#PROVIDER=}"; fi; \
-    ./scripts/toolchain.sh "python3 -m hermes_vps_app.cli up --repo-root . --provider ${P}"
+up PROVIDER_ARG="":
+    @./scripts/toolchain.sh "python3 -m hermes_vps_app.just_shim up --repo-root . --provider '{{ PROVIDER }}' --provider-arg '{{ PROVIDER_ARG }}'"
 
 # Comprehensive deployment pipeline: infra + bootstrap + validation + hardening checks
-deploy PROVIDER_ARG="": (_preflight PROVIDER_ARG)
-    @set -euo pipefail; \
-    P='{{ PROVIDER }}'; \
-    if [[ -z "$P" ]]; then P="${TF_VAR_cloud_provider:-}"; fi; \
-    if [[ -n '{{ PROVIDER_ARG }}' ]]; then P='{{ PROVIDER_ARG }}'; P="${P#PROVIDER=}"; fi; \
-    ./scripts/toolchain.sh "python3 -m hermes_vps_app.cli deploy --repo-root . --provider ${P}"
+deploy PROVIDER_ARG="":
+    @./scripts/toolchain.sh "python3 -m hermes_vps_app.just_shim deploy --repo-root . --provider '{{ PROVIDER }}' --provider-arg '{{ PROVIDER_ARG }}'"
