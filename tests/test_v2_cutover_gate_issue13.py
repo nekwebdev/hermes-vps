@@ -50,8 +50,9 @@ def test_issue13_aggregate_v2_cutover_gate_covers_public_surfaces_and_prerequisi
     assert shell.init_graph_builder is operational.build_init_graph
     assert shell.deploy_graph_builder is operational.build_deploy_graph
     assert shell.monitoring_graph_builder is operational.build_monitoring_graph
-    assert {action.workflow for action in shell.maintenance_actions()} == {"init"}
-    assert {action.workflow for action in shell.deploy_bootstrap_actions()} == {"deploy"}
+    assert {action.workflow for action in shell.maintenance_actions()} == {"destroy", "down"}
+    assert {action.workflow for action in shell.deployment_actions()} == {"deploy"}
+    assert {action.workflow for action in shell.deployment_advanced_actions()} == {"init", "plan", "apply", "bootstrap", "verify"}
     assert {action.workflow for action in shell.monitoring_actions()} == {"monitoring"}
 
     justfile = JUSTFILE_PATH.read_text(encoding="utf-8")

@@ -43,12 +43,30 @@ def build_parser() -> argparse.ArgumentParser:
     monitoring_p.add_argument("--repo-root", default=".")
     monitoring_p.add_argument("--provider", default=None)
     monitoring_p.add_argument("--output", choices=["human", "json"], default="human")
+
+    panel_p = sub.add_parser("panel")
+    panel_p.add_argument("--repo-root", default=".")
+    panel_p.add_argument("--advanced-unsafe-environment", action="store_true")
+    panel_p.add_argument("--allow-host-override", action="store_true")
+    panel_p.add_argument("--override-reason", default="")
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+
+    if args.action == "panel":
+        from hermes_vps_app import panel_entrypoint
+
+        panel_args = ["--repo-root", args.repo_root]
+        if args.advanced_unsafe_environment:
+            panel_args.append("--advanced-unsafe-environment")
+        if args.allow_host_override:
+            panel_args.append("--allow-host-override")
+        if args.override_reason:
+            panel_args.extend(["--override-reason", args.override_reason])
+        return panel_entrypoint.main(panel_args)
 
     if args.action in {"init", "init-upgrade", "plan", "apply", "destroy", "bootstrap", "verify", "up", "deploy"}:
         try:

@@ -48,10 +48,13 @@ PROVIDER := env("TF_VAR_cloud_provider", "")
       exit 1; \
     fi
 
-# Interactive onboarding: cloud, server, Hermes, Telegram, and optional SSH alias
+# Launch the canonical Textual control panel entrypoint with startup gate
+panel:
+    @TOOLCHAIN_QUIET=1 ./scripts/toolchain.sh "python3 -m hermes_vps_app.panel_entrypoint --repo-root ."
+
+# Interactive onboarding/reconfiguration through the canonical Textual control panel entrypoint
 configure:
-    @set -euo pipefail; \
-    TOOLCHAIN_QUIET=1 ./scripts/toolchain.sh "python3 -m scripts.configure_tui"
+    @TOOLCHAIN_QUIET=1 ./scripts/toolchain.sh "python3 -m hermes_vps_app.panel_entrypoint --repo-root . --initial-panel configuration"
 
 # Initialize OpenTofu in the selected provider directory
 init PROVIDER_ARG="":

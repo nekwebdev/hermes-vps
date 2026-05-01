@@ -4,9 +4,33 @@
 
 - control panel: installable Python package for interactive repo configuration, bootstrap, and maintenance/monitoring operations. Meant to be reusable across projects.
 - wizard: one flow inside the control panel for stepping through configuration decisions.
+- operator panel entrypoint: `just panel` launches the control panel shell as the main operator entrypoint; `just configure` remains available as an operator option rather than owning the whole panel.
+- configuration flow rewrite: the new configuration experience is a fresh panel-native rewrite that preserves validated operator behavior without preserving old configure TUI module boundaries/classes/screens.
+- configuration rewrite deletion gate: old configure code is deleted only after regression parity tests, manual/operator runs for missing `.env`, existing provider configs, bad permissions, token keep/replace paths, verified `just configure`/`just panel` same-app routing, and explicit HITL approval.
+- configuration panel modes: first-run uses a guided step wizard; reconfigure uses section-based targeted edits with review/diff before atomic `.env` write.
+- configuration data model: configuration UI edits typed config drafts mapped to/from `.env`; `.env` keys are persistence format, not widget/domain state.
+- configuration mapping contract: services own `load_env -> ProjectConfig`, `ProjectConfigDraft -> EnvPatch`, redacted diff generation, and atomic `.env` write.
+- configuration ownership: `ProjectConfig`, `EnvPatch`, provider/server/Hermes/gateway config types, and `.env` key mapping live in `hermes_vps_app`; `hermes_control_core` may provide only generic validation/redaction/wizard primitives when reusable.
+- configuration secret-preserve policy: existing secret values default to keep-existing, not replace, unless the operator explicitly chooses replacement.
+- configuration async validation policy: stale or failed async validation results must never be persisted.
+- configuration dependency policy: provider changes trigger dependent field review/reset/validation for region and instance type.
+- configuration parity contract: preserve provider-as-`.env` source of truth, optional per-command overrides without persistence, cloud sample/live modes with strict typed live remediation, coherent provider/region/type choices, server SSH/admin/key validation, OAuth/API-key distinction, async stale-safe Hermes and Telegram validation, no secret leakage in previews, review diff before write, atomic `.env` writes, and no `.env.example` edits unless explicitly requested.
+- first-run panel flow: when `.env` is missing, `just panel` opens the control panel shell on a configuration-required screen; the configuration wizard runs as a panel subflow inside the same app.
+- configure shortcut: `just configure` launches the same panel app as a deep link into the config panel/subflow, not a separate user-facing TUI app.
+- panel UI technology: Textual is the locked-in UI framework for the control panel, not a provisional v1 choice.
+- panel UI integration boundary: Textual owns screen routing, widget state/focus, async worker lifecycle/correlation, progress rendering, view composition, and direct service calls; app services own `.env` parsing/writing, provider auth classification, command construction, secret redaction, DAG semantics, and destructive gates.
+- operator snapshot: dashboard primary next action is computed from a non-secret snapshot of `.env` structure, provider selection, runner mode, provider directory, OpenTofu state/outputs, bootstrap/verify status if known, and cheap local health summary.
+- dashboard primary action rules: missing `.env` -> Configure; structurally invalid `.env` -> Fix configuration; no OpenTofu outputs/state -> Deploy; outputs without successful bootstrap/verify -> Bootstrap/Verify; verified with warnings -> Monitor/Fix; healthy -> Monitor.
+- Deployment panel workflow: primary Deploy is an aggregate `init -> plan -> apply -> bootstrap -> verify` workflow with graph preview and streamed node progress; advanced mode exposes individual init/plan/apply/bootstrap/verify steps.
+- Maintenance panel destructive ownership: destroy/down lives in Maintenance, not Deployment, and is shown only as a separately gated destructive lifecycle-management action.
+- dashboard freshness policy: startup uses cheap local checks by default; expensive or remote checks are explicit refresh actions and may show stale/unknown status until run.
+- control panel startup gate: startup performs runner detection/lock before the main dashboard, renders visible progress for each local validation step, and shows a blocking remediation screen when the selected environment path is unavailable.
+- startup blocking failures: existing `.env` unreadable or too broad, missing/invalid provider, missing provider directory, and unavailable locked runner block the dashboard with remediation.
+- startup warning failures: missing/invalid provider tokens, unavailable cloud metadata, unreachable remote host, missing/stale OpenTofu outputs, and Hermes/Telegram validation failures appear as dashboard warnings or action-specific remediation, not startup blockers.
 - framework core: stable primitives only (state machine, step registry, async task correlation, validation/error contracts, rendering primitives).
 - standard panels: library-shipped panels built on core primitives: config, bootstrap, maintenance, monitoring.
-- panel taxonomy: `maintenance` is state-changing operator workflows; `monitoring` is read-only observability workflows.
+- panel taxonomy: top-level user-facing panels are Configuration, Deployment, Maintenance, and Monitoring; `maintenance` is state-changing post-deploy operator workflows, `monitoring` is read-only observability workflows, and bootstrap is a workflow inside Deployment rather than a panel name.
+- monitoring content: read-only logs and hardening audit views belong in Monitoring; state-changing composites that include read-only output belong in Maintenance because mutation determines panel ownership.
 - monitoring v1 scope: on-demand checks only (no background collector daemon in v1).
 - HealthProbe contract: returns structured severity (`ok|warn|crit`) with evidence payload (not just pass/fail).
 - HealthProbe result schema v1: `probe_id`, `severity`, `summary`, `evidence`, `observed_at`, `runner_mode`, optional `remediation_hint`, and redacted `source_command`.
@@ -21,7 +45,10 @@
 - gateway runtime ownership: gateways must attach to shared system Hermes runtime/session state; no per-gateway isolated Hermes environment, files, or memory stores.
 - gateway session policy: still under design; interface must remain extensible for future session-routing choices.
 - boundary split: `GatewayManager` handles gateway configuration/validation only; session/thread routing is a separate future `SessionRouter` interface, deferred from v1 implementation.
+- panel execution boundary: panel actions call `hermes_vps_app` services/action graphs directly; Just recipes remain thin wrappers around the same Python entrypoints and are never called from the panel.
 - panel execution model: DAG action engine (acyclic dependency graph of typed actions). Engine orchestrates order, safe parallelism, retries, and structured status; UI layer does not contain shell/business execution logic.
+- panel progress model: default progress view is structured graph/node status with summary and elapsed time; bounded redacted stdout/stderr tails, source command, and remediation hints live in expandable per-node details.
+- panel failure presentation: failures pin the failed node and show repair/rerun scope (`failed node`, `failed subtree`, or `full panel`).
 - DAG node contract: each action declares typed inputs/outputs, preconditions, side-effect level, timeout/retry policy, and repair/rollback hints.
 - DAG v1 topology policy: static graphs with small conditional branches; no general runtime graph expansion in v1.
 - packaging boundary: immediate split into two packages in same repo: `hermes_control_core` (reusable framework + standard panels) and `hermes_vps_app` (repo-specific nodes/adapters/assets).
@@ -30,6 +57,7 @@
 - plugin compatibility contract: plugins declare supported core version range; incompatible core/plugin combinations fail fast at load time.
 - runner policy: `HostRunner` disabled by default.
 - host override policy: requires both explicit enable flag and non-empty `override_reason` recorded in audit metadata.
+- host override panel UX: host override is available only as an advanced unsafe-environment remediation path; it requires explicit enablement, non-empty reason, per-run escalation token, visible `runner=host` warning, and never persists.
 - host override safety gate: any host-override run requires explicit pre-run escalation confirmation before engine execution (including otherwise non-destructive actions).
 - host override gate placement: enforced at engine preflight layer (central, non-bypassable), not delegated to per-action handlers.
 - host override escalation token: `I-ACK-HOST-OVERRIDE`.
@@ -55,7 +83,8 @@
 - shim policy: Justfile remains as thin compatibility layer delegating to new app entrypoints during transition.
 - removal criteria: delete Justfile only after full command-coverage parity and documentation cutover are complete.
 - Justfile removal HITL decision: deferred after v2 aggregate gate; keep Justfile as thin compatibility shim through at least one real operator cycle, then require a separate HITL checkpoint and implementation issue before deletion.
-- implementation sequencing preference: start with runner detection/lock module, then perform package split, then migrate panel flows.
+- panel implementation sequence: build `just panel`/panel CLI entrypoint, real startup gate, blocking remediation screens, dashboard with real startup summary and placeholder cards, missing-`.env` configuration-required screen, then Configuration rewrite, then Deployment/Maintenance/Monitoring action wiring.
+- panel rewrite test strategy: use service tests for config mapping/redacted diffs/atomic writes/startup classification/operator snapshot rules, focused Textual tests for routing/deep links/stale async/progress rendering, and thin Just/CLI tests for entrypoint wiring; avoid brittle CSS/layout or screenshot goldens.
 - runner lock scope: per-launch only (fresh detection on each new app run); never persisted across launches.
 - environment readiness policy: if Docker fallback is selected but Docker is missing, show guided install steps and exit immediately; no panel execution before dev environment is valid.
 - validate_env policy: hard-fail when both `.env` and `.env.example` are absent; remediation points user to bootstrap/template step.
@@ -72,7 +101,7 @@
 - cloud auth failure granularity: split auth failures when detectable (`token_invalid` vs `token_insufficient_scope`) instead of a single coarse auth error.
 - cloud auth ambiguity policy: when provider diagnostics are inconclusive, classify as `auth_unknown` instead of forcing a precise subtype.
 - cloud auth classification ownership: `ProviderService` is the source of truth for auth subtype classification and returns typed auth errors consumed by app/UI layers.
-- ADR policy for cloud preflight taxonomy/remediation: defer ADR for now; keep in CONTEXT until reused across at least two surfaces, then reassess ADR need.
+- cloud preflight taxonomy/remediation ADR: promoted in `docs/adr/0002-cloud-live-lookup-strict-preflight-and-typed-remediation.md` after reuse across config panel/live lookup and TUI cloud validation; contract remains app-owned in `hermes_vps_app`, not a public plugin API freeze.
 - cloud remediation typing policy: define a stable typed model now in `hermes_vps_app` (avoid untyped dict drift for remediation payloads).
 - cloud remediation checks typing: model `checks[]` as a discriminated union with explicit `kind` values (`binary_present`, `token_present`, `auth_probe`, `metadata_probe`) and kind-specific fields.
 - cloud remediation expected-outcome contract: checks use machine-checkable predicates (e.g., `exit_code == 0`, `json_path_exists`, `stdout_regex`) with optional human note.

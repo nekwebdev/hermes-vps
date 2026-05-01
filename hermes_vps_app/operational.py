@@ -861,20 +861,50 @@ def build_monitoring_graph() -> ActionGraph:
                 "saved plan presence/staleness summary",
                 deps=["provider_resolution"],
             ),
+            "logs_read_only": _monitoring_action(
+                "logs_read_only",
+                "read-only logs view",
+            ),
+            "hardening_audit_read_only": _monitoring_action(
+                "hardening_audit_read_only",
+                "read-only hardening audit view",
+            ),
+            "health_probe": _monitoring_action(
+                "health_probe",
+                "on-demand local health probe summary",
+                deps=["runner_toolchain_readiness", "env_file_posture", "provider_directory"],
+            ),
         },
     )
     graph.validate()
     return graph
 
 
-def _monitoring_check(probe_id: str, severity: str, summary: str, evidence: dict[str, Any]) -> dict[str, Any]:
-    return {
+def _monitoring_check(
+    probe_id: str,
+    severity: str,
+    summary: str,
+    evidence: dict[str, Any],
+    *,
+    remediation_hint: str | None = None,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
         "probe_id": probe_id,
         "severity": severity,
         "summary": summary,
         "evidence": evidence,
+        "observed_time": datetime.now(UTC).isoformat(),
         "runner_mode": "local",
+        "source_command": {
+            "redacted": True,
+            "argv": ["<internal-read-only-probe>", probe_id],
+        },
     }
+    if remediation_hint is not None:
+        payload["remediation_hint"] = remediation_hint
+    elif severity != "ok":
+        payload["remediation_hint"] = "Review the probe evidence and repair the local input before rerunning monitoring."
+    return payload
 
 
 def run_monitoring_graph(*, repo_root: Path, provider_override: str | None) -> dict[str, Any]:
@@ -976,6 +1006,52 @@ def run_monitoring_graph(*, repo_root: Path, provider_override: str | None) -> d
                 "present": saved_plan_exists,
                 "stale": saved_plan_stale,
             },
+        )
+    )
+
+    log_paths = [
+        "/var/log/hermes/hermes.log",
+        "/var/log/telegram-gateway/gateway.log",
+        "journalctl -u hermes -u telegram-gateway",
+    ]
+    checks.append(
+        _monitoring_check(
+            "logs_read_only",
+            "ok",
+            "Read-only log surfaces cataloged without tailing remote output",
+            {"sources": log_paths, "remote_execution": False, "mutation": False},
+        )
+    )
+
+    hardening_script = repo_root / "bootstrap" / "20-hardening.sh"
+    verify_script = repo_root / "bootstrap" / "90-verify.sh"
+    hardening_ready = hardening_script.is_file() and verify_script.is_file()
+    checks.append(
+        _monitoring_check(
+            "hardening_audit_read_only",
+            "ok" if hardening_ready else "warn",
+            "Hardening audit inputs inspected without mutation",
+            {
+                "hardening_script_present": hardening_script.is_file(),
+                "verify_script_present": verify_script.is_file(),
+                "audit_mode": "read-only",
+            },
+            remediation_hint=None if hardening_ready else "Restore bootstrap hardening/verify scripts before relying on audit output.",
+        )
+    )
+
+    warning_count = sum(1 for check in checks if check.get("severity") != "ok")
+    checks.append(
+        _monitoring_check(
+            "health_probe",
+            "ok" if warning_count == 0 else "warn",
+            "On-demand health probes rendered for operator review",
+            {
+                "warning_count": warning_count,
+                "probe_count": len(checks),
+                "mode": "read-only",
+            },
+            remediation_hint=None if warning_count == 0 else "Inspect warning probes and rerun monitoring after local inputs are repaired.",
         )
     )
 

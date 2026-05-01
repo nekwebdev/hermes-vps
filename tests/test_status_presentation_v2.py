@@ -1,4 +1,4 @@
-# pyright: reportUnusedCallResult=false, reportImplicitOverride=false
+# pyright: reportAny=false, reportUnusedCallResult=false, reportImplicitOverride=false
 from __future__ import annotations
 
 import contextlib
@@ -95,7 +95,7 @@ class StatusPresentationV2Tests(unittest.TestCase):
         action_ids = {str(action["action_id"]) for action in actions}
         self.assertIn("runner_toolchain_readiness", action_ids)
         self.assertIn("provider_resolution", action_ids)
-        self.assertEqual(cli_payload, shell_payload)
+        self.assertEqual(_strip_observed_times(cli_payload), _strip_observed_times(shell_payload))
 
     def test_cli_human_output_renders_status_lines_from_same_contract(self) -> None:
         from hermes_vps_app.cli import main
@@ -115,6 +115,17 @@ class StatusPresentationV2Tests(unittest.TestCase):
         self.assertIn("init: graph=init completed=true runner=direnv_nix", rendered)
         self.assertIn("tofu_init: succeeded runner=direnv_nix", rendered)
         self.assertIn("redaction_marker=***", rendered)
+
+
+def _strip_observed_times(payload: dict[str, Any]) -> dict[str, Any]:
+    normalized = json.loads(json.dumps(payload))
+    actions = cast(list[dict[str, Any]], normalized.get("actions", []))
+    for action in actions:
+        result = cast(dict[str, Any], action.get("result", {}))
+        details = cast(dict[str, Any], result.get("details", {}))
+        if "observed_time" in details:
+            details["observed_time"] = "<observed>"
+    return cast(dict[str, Any], normalized)
 
 
 if __name__ == "__main__":

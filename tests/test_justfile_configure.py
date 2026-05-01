@@ -8,9 +8,11 @@ class JustfileConfigureTests(unittest.TestCase):
         justfile = pathlib.Path("Justfile").read_text()
         self.assertIn("configure:", justfile)
         self.assertIn(
-            'TOOLCHAIN_QUIET=1 ./scripts/toolchain.sh "python3 -m scripts.configure_tui"',
+            'TOOLCHAIN_QUIET=1 ./scripts/toolchain.sh "python3 -m hermes_vps_app.panel_entrypoint --repo-root . --initial-panel configuration"',
             justfile,
         )
+        configure_recipe = justfile.split("configure:", 1)[1].split("\n#", 1)[0]
+        self.assertNotIn("scripts.configure_tui", configure_recipe)
 
 
 if __name__ == "__main__":

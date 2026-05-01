@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, cast
 
 from hermes_control_core.actions import sanitize_for_schema
@@ -103,6 +104,9 @@ class StatusActionPresentation:
     repair_scope: str | None = None
     error: str | None = None
     result: dict[str, object] | None = None
+    elapsed_seconds: float | None = None
+    details: dict[str, object] | None = None
+    pinned: bool = False
     redactions_applied: bool = True
 
     def to_dict(self) -> dict[str, object]:
@@ -120,6 +124,12 @@ class StatusActionPresentation:
             payload["error"] = sanitize_for_schema(self.error)
         if self.result is not None:
             payload["result"] = sanitize_for_schema(self.result)
+        if self.elapsed_seconds is not None:
+            payload["elapsed_seconds"] = self.elapsed_seconds
+        if self.details is not None:
+            payload["details"] = sanitize_for_schema(self.details)
+        if self.pinned:
+            payload["pinned"] = True
         return payload
 
 
@@ -133,6 +143,9 @@ class StatusPresentation:
     redactions_applied: bool = True
     result_summary: dict[str, object] | None = None
     host_override: dict[str, object] | None = None
+    elapsed_seconds: float | None = None
+    failed_node: str | None = None
+    repair_scope: str | None = None
 
     def to_dict(self) -> dict[str, object]:
         payload: dict[str, object] = {
@@ -148,6 +161,13 @@ class StatusPresentation:
             payload["runner_mode"] = self.runner_mode
         if self.host_override is not None:
             payload["host_override"] = sanitize_for_schema(self.host_override)
+        payload["progress"] = _progress_summary(self.actions, self.elapsed_seconds)
+        if self.failed_node is not None:
+            payload["failed_node"] = self.failed_node
+            payload["repair"] = {
+                "failed_node": self.failed_node,
+                "rerun_scope": self.repair_scope or "failed node",
+            }
         return payload
 
     def to_json(self) -> str:
@@ -181,6 +201,8 @@ def presentation_from_engine_result(*, workflow: str, graph: ActionGraph, result
     actions: list[StatusActionPresentation] = []
     runner_modes: list[str] = []
     redactions = True
+    failed_node: str | None = None
+    failed_repair_scope: str | None = None
     for action_id, state in sorted(result.states.items(), key=lambda item: item[0]):
         descriptor = graph.actions[action_id]
         state_result = cast(dict[str, object], state.result or {})
@@ -194,6 +216,9 @@ def presentation_from_engine_result(*, workflow: str, graph: ActionGraph, result
             action_redactions = bool(state_result.get("redactions_applied", True))
         redactions = redactions and action_redactions
         repair_scope = _repair_scope_for_descriptor(descriptor.repair_hint) if state.last_error or descriptor.repair_hint else None
+        if state.last_error and failed_node is None:
+            failed_node = action_id
+            failed_repair_scope = repair_scope or "failed node"
         actions.append(
             StatusActionPresentation(
                 action_id=action_id,
@@ -203,6 +228,9 @@ def presentation_from_engine_result(*, workflow: str, graph: ActionGraph, result
                 repair_scope=repair_scope,
                 error=state.last_error,
                 result=state_result,
+                elapsed_seconds=_elapsed_seconds(state.started_at, state.finished_at),
+                details=_node_details(descriptor=descriptor, result=state_result, repair_scope=repair_scope),
+                pinned=bool(state.last_error),
                 redactions_applied=action_redactions,
             )
         )
@@ -215,6 +243,9 @@ def presentation_from_engine_result(*, workflow: str, graph: ActionGraph, result
         redactions_applied=redactions,
         result_summary=result.to_summary(),
         host_override=result.host_override,
+        elapsed_seconds=_graph_elapsed_seconds(result),
+        failed_node=failed_node,
+        repair_scope=failed_repair_scope,
     )
 
 
@@ -276,6 +307,72 @@ def _string_or_none(value: object) -> str | None:
     if value is None:
         return None
     return str(value)
+
+
+def _elapsed_seconds(started_at: datetime | None, finished_at: datetime | None) -> float | None:
+    if started_at is None or finished_at is None:
+        return None
+    return max(0.0, round((finished_at - started_at).total_seconds(), 3))
+
+
+def _graph_elapsed_seconds(result: EngineResult) -> float | None:
+    starts = [state.started_at for state in result.states.values() if state.started_at is not None]
+    finishes = [state.finished_at for state in result.states.values() if state.finished_at is not None]
+    if not starts or not finishes:
+        return None
+    return max(0.0, round((max(finishes) - min(starts)).total_seconds(), 3))
+
+
+def _progress_summary(actions: list[StatusActionPresentation], elapsed_seconds: float | None) -> dict[str, object]:
+    counts = {
+        "pending": 0,
+        "ready": 0,
+        "running": 0,
+        "succeeded": 0,
+        "failed": 0,
+        "blocked": 0,
+        "skipped": 0,
+        "cancelled": 0,
+    }
+    for action in actions:
+        counts[action.status] = counts.get(action.status, 0) + 1
+    payload: dict[str, object] = {"total": len(actions), **counts}
+    if elapsed_seconds is not None:
+        payload["elapsed_seconds"] = elapsed_seconds
+    return payload
+
+
+def _node_details(
+    *,
+    descriptor: object,
+    result: dict[str, object],
+    repair_scope: str | None,
+) -> dict[str, object] | None:
+    details: dict[str, object] = {}
+    command = result.get("command")
+    if command is not None:
+        details["source_command"] = command
+    else:
+        label = getattr(descriptor, "label", None)
+        if isinstance(label, str) and label.strip():
+            details["source_command"] = label.split()
+    output = result.get("output")
+    if isinstance(output, dict):
+        typed_output = cast(dict[str, object], output)
+        for key in ("stdout_tail", "stderr_tail", "truncated", "tail_bytes"):
+            if key in typed_output:
+                details[key] = typed_output[key]
+    hint = getattr(descriptor, "repair_hint", None)
+    hints: list[str] = []
+    if isinstance(hint, str) and hint.strip():
+        hints.append(hint.strip())
+    if repair_scope is not None:
+        hints.append(f"Repair or rerun scope: {repair_scope}.")
+    if not hints and "source_command" in details:
+        hints.append("If this node fails, inspect the bounded output tails, repair inputs, and rerun the failed node.")
+    if hints:
+        details["remediation_hints"] = hints
+    return details or None
 
 
 def preview_from_graph(

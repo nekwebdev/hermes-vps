@@ -1,6 +1,6 @@
 # PRD: Control Panel v2 Hardening, Docs Cutover, and Operational UX Polish
 
-Status: needs-triage
+Status: completed
 
 ## Problem Statement
 

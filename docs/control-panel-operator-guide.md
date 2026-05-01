@@ -8,14 +8,15 @@ Use this form for direct Python entrypoints:
 ./scripts/toolchain.sh "python3 -m hermes_vps_app.cli <workflow> --repo-root ."
 ```
 
-Use `./scripts/toolchain.sh "python3 -m scripts.configure_tui"` for the configuration wizard. The Just recipes remain compatibility shims for migrated workflows, but the Python entrypoints are the canonical surface for automation and JSON output.
+Use `just configure` or `./scripts/toolchain.sh "python3 -m hermes_vps_app.panel_entrypoint --repo-root . --initial-panel configuration"` for the native panel configuration wizard. The old `python3 -m scripts.configure_tui` implementation is temporary source material only until the operator validation gate in `docs/operator-validation-configure-deletion.md` is completed and explicit HITL approval is recorded. The Just recipes remain compatibility shims for migrated workflows, but the Python entrypoints are the canonical surface for automation and JSON output.
 
 ## Workflow quick reference
 
 Configure:
 
 ```bash
-./scripts/toolchain.sh "python3 -m scripts.configure_tui"
+just configure
+./scripts/toolchain.sh "python3 -m hermes_vps_app.panel_entrypoint --repo-root . --initial-panel configuration"
 ```
 
 The wizard creates `.env` from `.env.example` when needed, enforces mode `0600`, guides provider selection, and writes provider/Hermes/Telegram settings. Do not paste secrets into tickets or logs.
@@ -198,7 +199,7 @@ For new automation, prefer the Python CLI directly because it exposes `--output 
 
 Migration mapping:
 
-- `just configure` -> `./scripts/toolchain.sh "python3 -m scripts.configure_tui"`
+- `just configure` -> `./scripts/toolchain.sh "python3 -m hermes_vps_app.panel_entrypoint --repo-root . --initial-panel configuration"`
 - `just init` -> `./scripts/toolchain.sh "python3 -m hermes_vps_app.cli init --repo-root ."`
 - `just init-upgrade` -> `./scripts/toolchain.sh "python3 -m hermes_vps_app.cli init-upgrade --repo-root ."`
 - `just plan` -> `./scripts/toolchain.sh "python3 -m hermes_vps_app.cli plan --repo-root ."`

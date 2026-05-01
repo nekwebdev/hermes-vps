@@ -1,6 +1,6 @@
 # PRD: Python Control Panel Command Coverage and Panel Shell v1
 
-Status: needs-triage
+Status: completed
 
 ## Problem Statement
 
