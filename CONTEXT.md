@@ -1,0 +1,88 @@
+# Context
+
+## Glossary
+
+- control panel: installable Python package for interactive repo configuration, bootstrap, and maintenance/monitoring operations. Meant to be reusable across projects.
+- wizard: one flow inside the control panel for stepping through configuration decisions.
+- framework core: stable primitives only (state machine, step registry, async task correlation, validation/error contracts, rendering primitives).
+- standard panels: library-shipped panels built on core primitives: config, bootstrap, maintenance, monitoring.
+- panel taxonomy: `maintenance` is state-changing operator workflows; `monitoring` is read-only observability workflows.
+- monitoring v1 scope: on-demand checks only (no background collector daemon in v1).
+- HealthProbe contract: returns structured severity (`ok|warn|crit`) with evidence payload (not just pass/fail).
+- HealthProbe result schema v1: `probe_id`, `severity`, `summary`, `evidence`, `observed_at`, `runner_mode`, optional `remediation_hint`, and redacted `source_command`.
+- HealthProbe threshold ownership: core provides severity primitives/evaluation helpers; probe-specific thresholds live in `hermes_vps_app` and are configurable via repo config/env.
+- HealthProbe error semantics: probe execution errors default to `warn` with explicit error evidence; `crit` is reserved for successful probes that detect critical state.
+- strict monitoring mode: optional policy to treat probe execution errors as `crit`.
+- CloudProvider v1 surface: `list_regions()`, `list_instance_types(region)`, `validate_credentials()`, `render_user_data(input)`, `plan_preview(input)`.
+- Cloud planning authority: provider `plan_preview` is advisory only; tofu plan/apply remains source of truth.
+- InfraPlanner v1 surface: `init()`, `plan(vars, out_path)`, `apply(plan_path)`, `destroy(plan_path_or_vars)`, `show_plan(plan_path)`, `detect_stale_plan(plan_path, vars_fingerprint)`.
+- RemoteExecutor v1 surface: `wait_ready(target, timeout)`, `run_script(target, script_ref, args, env_handles)`, `push_file(target, local, remote, mode)`, `fetch_file(target, remote, local)`, optional `verify_fingerprint(target, expected)`.
+- GatewayManager v1 surface: `detect_auth_mode(provider)`, `validate_provider_access(provider, secret_handle?)`, `configure_gateway(gateway_kind, config_handles)`, `smoke_test_gateway(gateway_kind)`.
+- gateway runtime ownership: gateways must attach to shared system Hermes runtime/session state; no per-gateway isolated Hermes environment, files, or memory stores.
+- gateway session policy: still under design; interface must remain extensible for future session-routing choices.
+- boundary split: `GatewayManager` handles gateway configuration/validation only; session/thread routing is a separate future `SessionRouter` interface, deferred from v1 implementation.
+- panel execution model: DAG action engine (acyclic dependency graph of typed actions). Engine orchestrates order, safe parallelism, retries, and structured status; UI layer does not contain shell/business execution logic.
+- DAG node contract: each action declares typed inputs/outputs, preconditions, side-effect level, timeout/retry policy, and repair/rollback hints.
+- DAG v1 topology policy: static graphs with small conditional branches; no general runtime graph expansion in v1.
+- packaging boundary: immediate split into two packages in same repo: `hermes_control_core` (reusable framework + standard panels) and `hermes_vps_app` (repo-specific nodes/adapters/assets).
+- plugin API lifecycle: provisional during v1 buildout; iterate fast before freezing stable API.
+- plugin compatibility contract: plugins declare supported core version range; incompatible core/plugin combinations fail fast at load time.
+- runner policy: `HostRunner` disabled by default.
+- host override policy: requires both explicit enable flag and non-empty `override_reason` recorded in audit metadata.
+- host override safety gate: any host-override run requires explicit pre-run escalation confirmation before engine execution (including otherwise non-destructive actions).
+- host override gate placement: enforced at engine preflight layer (central, non-bypassable), not delegated to per-action handlers.
+- host override escalation token: `I-ACK-HOST-OVERRIDE`.
+- host override denial errors must not echo provided token values (no token leakage in messages/logs).
+- host override audit policy: denied attempts are recorded with `approved=false` and `token_used=None`; approved attempts may record canonical token usage.
+- host override audit details: include non-secret `override_reason` in preflight audit details when provided.
+- nix execution modes: (1) direnv-attached mode when repo shell already provides flake toolchain, (2) explicit `nix develop` mode when nix exists but direnv is absent/not active.
+- fallback policy: when nix is unavailable/non-viable on host OS, use Docker-based nix runner.
+- runner detection order: direnv-attached flake shell -> nix available (`nix develop`) -> dockerized nix fallback -> explicit HostRunner override only.
+- runner lifecycle: detect once at app startup, lock selected runner for full session.
+- secrets policy: hard default of no secret persistence in framework state/logs.
+- secrets exception path: audited per-node escape hatch required to persist any secret material.
+- secret handling model: framework stores secret references/handles and materializes raw secret values only at execution boundaries when strictly required.
+- DAG failure semantics: fail-fast on critical path by default; optional nodes may declare `allow_failure=true`.
+- recovery semantics: engine emits repair/rerun scopes (failed node only, failed subtree, full panel).
+- execution caching: successful nodes cache by deterministic content hash of typed inputs + node version.
+- destructive-action gate: nodes marked `side_effect_level=destructive` require explicit confirmation token in interactive mode.
+- non-interactive destructive gate: requires explicit `--approve-destructive` style override and emits an audit log entry.
+- destructive preview contract: UI must show exact target scope before confirmation using only non-secret data: provider, OpenTofu provider directory, backup root/path behavior, local state files count/list, and known safe OpenTofu outputs (`public_ipv4`, `admin_username`, optional server/resource IDs if already exposed by outputs).
+- destroy confirmation token policy: interactive destroy requires exact token `DESTROY <provider>` after preview; headless destroy requires `--approve-destructive DESTROY:<provider>`, and absent/mismatched approval denies before backup or OpenTofu destroy.
+- destructive audit contract: record action_id, provider, tf_dir, backup_path/status, approved bool, confirmation_mode (`interactive|headless`), approved_by (`operator|cli_flag`), timestamp, target_summary, host_override_required/approved, and canonical token usage only; never persist or echo raw bad tokens.
+- migration strategy: staged shim cutover from Justfile to panel commands.
+- shim policy: Justfile remains as thin compatibility layer delegating to new app entrypoints during transition.
+- removal criteria: delete Justfile only after full command-coverage parity and documentation cutover are complete.
+- implementation sequencing preference: start with runner detection/lock module, then perform package split, then migrate panel flows.
+- runner lock scope: per-launch only (fresh detection on each new app run); never persisted across launches.
+- environment readiness policy: if Docker fallback is selected but Docker is missing, show guided install steps and exit immediately; no panel execution before dev environment is valid.
+- validate_env policy: hard-fail when both `.env` and `.env.example` are absent; remediation points user to bootstrap/template step.
+- cloud metadata lookup mode: `live_cloud_lookup=false` uses deterministic local sample options; `live_cloud_lookup=true` performs provider-backed region/instance-type discovery.
+- cloud metadata readiness gate: `live_cloud_lookup=true` is allowed only when preflight passes.
+- cloud metadata preflight policy: strict in real runtime path — invalid/missing token or missing provider binary hard-blocks live lookup (no silent continue).
+- cloud metadata preflight UX: preflight failure hard-stops the cloud step in real runtime path (no automatic downgrade to sample mode).
+- cloud metadata preflight remediation: messages must be provider-specific and command-specific (exact binary/token checks and install hints per provider).
+- cloud remediation ownership: provider remediation text lives in a central helper within `hermes_vps_app` for reuse across panel/TUI/API surfaces.
+- cloud remediation helper contract: structured payload (`summary`, `checks[]`, `install_hints[]`, optional `docs_url`) rather than plain string.
+- cloud remediation checks contract: `checks[]` includes executable command templates plus expected outcome shape (for verifiable/automatable preflight guidance).
+- cloud remediation secret-safety: remediation checks must be token-safe by construction (no raw secret echo/output; rely on exit status and non-sensitive/redacted fields).
+- cloud preflight failure taxonomy: remediation payload includes typed failure reasons (`missing_binary`, `missing_token`, `metadata_unavailable`) and auth subtypes for UI branching without string parsing.
+- cloud auth failure granularity: split auth failures when detectable (`token_invalid` vs `token_insufficient_scope`) instead of a single coarse auth error.
+- cloud auth ambiguity policy: when provider diagnostics are inconclusive, classify as `auth_unknown` instead of forcing a precise subtype.
+- cloud auth classification ownership: `ProviderService` is the source of truth for auth subtype classification and returns typed auth errors consumed by app/UI layers.
+- ADR policy for cloud preflight taxonomy/remediation: defer ADR for now; keep in CONTEXT until reused across at least two surfaces, then reassess ADR need.
+- cloud remediation typing policy: define a stable typed model now in `hermes_vps_app` (avoid untyped dict drift for remediation payloads).
+- cloud remediation checks typing: model `checks[]` as a discriminated union with explicit `kind` values (`binary_present`, `token_present`, `auth_probe`, `metadata_probe`) and kind-specific fields.
+- cloud remediation expected-outcome contract: checks use machine-checkable predicates (e.g., `exit_code == 0`, `json_path_exists`, `stdout_regex`) with optional human note.
+- cloud metadata preflight probe: minimal read-only auth sanity probe plus region-list metadata probe before loading instance types.
+- runner v1 API: single command primitive `run(command, *, cwd=None, env=None, timeout_s=None, stream=False, side_effect_level="low") -> RunResult`.
+- runner command typing: canonical command form is argv list (`list[str]`); shell-string execution requires explicit `shell=True`; default is `shell=False`.
+- RunResult contract: exit code, stdout/stderr, timing metadata, selected runner mode, and redaction indicator.
+- runner env model: per-call `env` is an overlay on runner base environment; `None` means no overlay; explicit unset sentinel supported for inherited variables.
+- runner log policy: environment values are redacted in logs by default.
+- timeout policy: action definitions must provide explicit timeout intent; runner enforces hard termination on timeout and returns typed timeout failures.
+- infinite-timeout policy: only allowed when action explicitly opts in and action is non-destructive.
+- streaming policy: `stream=False` buffers process output into `RunResult`; `stream=True` emits structured output events while retaining bounded output tails in `RunResult`.
+- output retention policy: stored output is size-capped to prevent memory growth.
+- runner error taxonomy: `RunnerUnavailable`, `CommandNotFound`, `CommandFailed`, `CommandTimeout`, `OutputLimitExceeded`, `RedactionError`.
+- retry contract: DAG retry policies match typed runner errors, never free-form stderr text.

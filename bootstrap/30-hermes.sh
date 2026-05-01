@@ -91,11 +91,11 @@ if ! [[ "${HERMES_AGENT_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z]+)*$
 fi
 
 HERMES_AGENT_RELEASE_TAG="${HERMES_AGENT_RELEASE_TAG:-}"
-if [[ -z "${HERMES_AGENT_RELEASE_TAG}" && "${HERMES_AGENT_VERSION}" == "0.10.0" ]]; then
-  HERMES_AGENT_RELEASE_TAG="v2026.4.16"
+if [[ -z "${HERMES_AGENT_RELEASE_TAG}" && "${HERMES_AGENT_VERSION}" == "0.11.0" ]]; then
+  HERMES_AGENT_RELEASE_TAG="v2026.4.23"
 fi
 if [[ -n "${HERMES_AGENT_RELEASE_TAG}" ]] && ! [[ "${HERMES_AGENT_RELEASE_TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z]+)*$ ]]; then
-  echo "ERROR: HERMES_AGENT_RELEASE_TAG must look like v2026.4.16." >&2
+  echo "ERROR: HERMES_AGENT_RELEASE_TAG must look like v2026.4.23." >&2
   exit 1
 fi
 
@@ -109,7 +109,7 @@ if [[ "$current_version" != "$HERMES_AGENT_VERSION" ]]; then
   set -e
 
   if [[ "$pypi_rc" -ne 0 ]]; then
-    : "${HERMES_AGENT_RELEASE_TAG:?ERROR: PyPI install failed. Set HERMES_AGENT_RELEASE_TAG (example: v2026.4.16) in .env for GitHub tarball fallback.}"
+    : "${HERMES_AGENT_RELEASE_TAG:?ERROR: PyPI install failed. Set HERMES_AGENT_RELEASE_TAG (example: v2026.4.23) in .env for GitHub tarball fallback.}"
     PIPX_HOME=/opt/pipx PIPX_BIN_DIR=/usr/local/bin \
       pipx install --force "https://github.com/NousResearch/hermes-agent/archive/refs/tags/${HERMES_AGENT_RELEASE_TAG}.tar.gz"
   fi

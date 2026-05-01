@@ -21,6 +21,7 @@
         };
         pythonEnv = pkgs.python3.withPackages (
           ps: with ps; [
+            pytest
             textual
           ]
         );
@@ -39,6 +40,7 @@
             coreutils
             bash
             shellcheck
+            ruff
             gum
             hcloud
             linode-cli

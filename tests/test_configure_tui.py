@@ -4,7 +4,13 @@ import unittest
 
 from textual.widgets import Button, Checkbox, Input, Label, Select, Static
 
-from scripts.configure_services import EnvStoreLike, HermesServiceLike, ProviderServiceLike
+from hermes_vps_app.cloud_remediation import remediation_for, render_remediation
+from scripts.configure_services import (
+    EnvStoreLike,
+    HermesServiceLike,
+    ProviderAuthError,
+    ProviderServiceLike,
+)
 from scripts.configure_state import LabeledValue, WizardState
 from scripts.configure_tui import (
     CloudLoaded,
@@ -35,6 +41,10 @@ class _FakeEnv:
 
 
 class _FakeProviderService:
+    def auth_probe(self, provider: str, token: str) -> None:
+        _ = provider
+        _ = token
+
     def location_options(self, provider: str, token: str) -> list[LabeledValue]:
         return [LabeledValue("DE, Nuremberg (nbg1)", "nbg1")]
 
@@ -92,7 +102,7 @@ class _FakeOrchestrator:
             admin_group="sshadmins",
             ssh_private_key_path="/tmp/hermes-test-key",
             hermes_agent_version="0.10.0",
-            hermes_agent_release_tag="v2026.4.16",
+            hermes_agent_release_tag="v0.10.0",
             hermes_provider="openai-codex",
             hermes_model="gpt-5.4-mini",
             hermes_auth_type="oauth_external+api_key",
@@ -155,7 +165,7 @@ class _FakeOrchestrator:
 
     def resolve_release_tag_for_version(self, version: str) -> str:
         if version == "0.10.0":
-            return "v2026.4.16"
+            return "v0.10.0"
         return f"v{version}" if version else ""
 
     def persist_hermes_step(self, state: WizardState) -> None:
@@ -283,7 +293,7 @@ class ConfigureTUITests(unittest.IsolatedAsyncioTestCase):
             review_text = str(app.query_one("#review-diff", Static).renderable)
             self.assertIn("SSH alias: active", review_text)
             self.assertIn("HERMES_AGENT_RELEASE_TAG:", review_text)
-            self.assertIn("v2026.4.16", review_text)
+            self.assertIn("v0.10.0", review_text)
             self.assertNotIn("HERMES_AUTH_TYPE:", review_text)
             self.assertNotIn("HERMES_AUTH_ARTIFACT:", review_text)
 
@@ -416,12 +426,20 @@ class ConfigureTUITests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(orchestrator.env.get("TF_VAR_cloud_provider"), "hetzner")
             self.assertEqual(orchestrator.env.get("TF_VAR_server_image"), "debian-13")
 
-    def test_cloud_lookup_error_message_is_descriptive(self):
-        msg = ConfigureTUI._describe_cloud_lookup_error(
-            "hetzner", "command failed: hcloud location list -o json (401 unauthorized)"
+    def test_cloud_lookup_error_message_uses_typed_remediation_contract(self):
+        typed_error = ProviderAuthError(
+            "token_insufficient_scope",
+            "command failed: hcloud context list -o json (authorization bearer sk_live_ABC123XYZ)",
         )
-        self.assertIn("Invalid Hetzner API token", msg)
-        self.assertIn("Follow the token instructions above", msg)
+
+        msg = ConfigureTUI._describe_cloud_lookup_error("hetzner", typed_error)
+
+        expected = render_remediation(
+            remediation_for("hetzner", "token_insufficient_scope", str(typed_error))
+        )
+        self.assertEqual(msg, expected)
+        self.assertIn("[REDACTED]", msg)
+        self.assertIn("[auth_probe] hcloud context list -o json", msg)
 
     async def test_server_step_keeps_env_values_when_inputs_left_blank(self):
         orchestrator = _FakeOrchestrator()

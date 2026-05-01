@@ -56,8 +56,7 @@ init PROVIDER_ARG="": (_preflight PROVIDER_ARG)
     P='{{ PROVIDER }}'; \
     if [[ -z "$P" ]]; then P="${TF_VAR_cloud_provider:-}"; fi; \
     if [[ -n '{{ PROVIDER_ARG }}' ]]; then P='{{ PROVIDER_ARG }}'; P="${P#PROVIDER=}"; fi; \
-    TF_DIR="opentofu/providers/${P}"; \
-    ./scripts/toolchain.sh "TF_VAR_cloud_provider=${P} tofu -chdir=${TF_DIR} init"
+    ./scripts/toolchain.sh "python3 -m hermes_vps_app.cli init --repo-root . --provider ${P}"
 
 # Initialize OpenTofu and upgrade provider/module plugins
 init-upgrade PROVIDER_ARG="": (_preflight PROVIDER_ARG)
@@ -65,8 +64,7 @@ init-upgrade PROVIDER_ARG="": (_preflight PROVIDER_ARG)
     P='{{ PROVIDER }}'; \
     if [[ -z "$P" ]]; then P="${TF_VAR_cloud_provider:-}"; fi; \
     if [[ -n '{{ PROVIDER_ARG }}' ]]; then P='{{ PROVIDER_ARG }}'; P="${P#PROVIDER=}"; fi; \
-    TF_DIR="opentofu/providers/${P}"; \
-    ./scripts/toolchain.sh "TF_VAR_cloud_provider=${P} tofu -chdir=${TF_DIR} init -upgrade"
+    ./scripts/toolchain.sh "python3 -m hermes_vps_app.cli init-upgrade --repo-root . --provider ${P}"
 
 # Create and save OpenTofu execution plan (tofuplan)
 plan PROVIDER_ARG="": (_preflight PROVIDER_ARG)
@@ -74,8 +72,7 @@ plan PROVIDER_ARG="": (_preflight PROVIDER_ARG)
     P='{{ PROVIDER }}'; \
     if [[ -z "$P" ]]; then P="${TF_VAR_cloud_provider:-}"; fi; \
     if [[ -n '{{ PROVIDER_ARG }}' ]]; then P='{{ PROVIDER_ARG }}'; P="${P#PROVIDER=}"; fi; \
-    TF_DIR="opentofu/providers/${P}"; \
-    ./scripts/toolchain.sh "TF_VAR_cloud_provider=${P} tofu -chdir=${TF_DIR} plan -out=tofuplan"
+    ./scripts/toolchain.sh "python3 -m hermes_vps_app.cli plan --repo-root . --provider ${P}"
 
 # Apply tofuplan (regenerates plan automatically when stale/missing)
 apply PROVIDER_ARG="": (_preflight PROVIDER_ARG)
@@ -83,30 +80,7 @@ apply PROVIDER_ARG="": (_preflight PROVIDER_ARG)
     P='{{ PROVIDER }}'; \
     if [[ -z "$P" ]]; then P="${TF_VAR_cloud_provider:-}"; fi; \
     if [[ -n '{{ PROVIDER_ARG }}' ]]; then P='{{ PROVIDER_ARG }}'; P="${P#PROVIDER=}"; fi; \
-    TF_DIR="opentofu/providers/${P}"; \
-    PLAN_FILE="${TF_DIR}/tofuplan"; \
-    if [[ ! -f "${PLAN_FILE}" ]]; then \
-      echo "INFO: no saved plan found, generating fresh plan."; \
-      ./scripts/toolchain.sh "TF_VAR_cloud_provider=${P} tofu -chdir=${TF_DIR} plan -out=tofuplan"; \
-    fi; \
-    set +e; \
-    APPLY_OUTPUT=$(./scripts/toolchain.sh "TF_VAR_cloud_provider=${P} tofu -chdir=${TF_DIR} apply tofuplan" 2>&1); \
-    APPLY_RC=$?; \
-    set -e; \
-    if [[ "$APPLY_RC" -ne 0 ]]; then \
-      echo "$APPLY_OUTPUT"; \
-      if grep -Eq 'Saved plan is stale|Failed to load .*tofuplan|No such file or directory' <<< "$APPLY_OUTPUT"; then \
-        echo "INFO: saved plan missing/stale, regenerating and retrying apply."; \
-        ./scripts/toolchain.sh "TF_VAR_cloud_provider=${P} tofu -chdir=${TF_DIR} plan -out=tofuplan"; \
-        ./scripts/toolchain.sh "TF_VAR_cloud_provider=${P} tofu -chdir=${TF_DIR} apply tofuplan"; \
-      else \
-        exit "$APPLY_RC"; \
-      fi; \
-    else \
-      echo "$APPLY_OUTPUT"; \
-    fi; \
-    SERVER_IP=$(./scripts/toolchain.sh "TF_VAR_cloud_provider=${P} tofu -chdir=${TF_DIR} output -raw public_ipv4"); \
-    ./scripts/update_ssh_alias.sh .ssh/config hermes-vps "${SERVER_IP}"
+    ./scripts/toolchain.sh "python3 -m hermes_vps_app.cli apply --repo-root . --provider ${P}"
 
 # Destroy managed infrastructure (requires CONFIRM=YES)
 destroy CONFIRM="NO" PROVIDER_ARG="": (_preflight PROVIDER_ARG)
@@ -121,23 +95,11 @@ destroy CONFIRM="NO" PROVIDER_ARG="": (_preflight PROVIDER_ARG)
     P='{{ PROVIDER }}'; \
     if [[ -z "$P" ]]; then P="${TF_VAR_cloud_provider:-}"; fi; \
     if [[ -n '{{ PROVIDER_ARG }}' ]]; then P='{{ PROVIDER_ARG }}'; P="${P#PROVIDER=}"; fi; \
-    TF_DIR="opentofu/providers/${P}"; \
-    umask 077; \
-    BACKUP_ROOT='.state-backups'; \
-    BACKUP_DIR="${BACKUP_ROOT}/${P}"; \
-    TS="$(date -u +%Y%m%dT%H%M%SZ)"; \
-    BACKUP_FILE="${BACKUP_DIR}/tfstate-${TS}.tar.gz"; \
-    mkdir -p "${BACKUP_DIR}"; \
-    chmod 700 "${BACKUP_ROOT}" "${BACKUP_DIR}"; \
-    mapfile -t STATE_FILES < <(find "${TF_DIR}" -type f \( -name '*.tfstate' -o -name '*.tfstate.backup' \)); \
-    if (( ${#STATE_FILES[@]} > 0 )); then \
-      tar -czf "${BACKUP_FILE}" "${STATE_FILES[@]}"; \
-      chmod 600 "${BACKUP_FILE}"; \
-      echo "Saved local state backup: ${BACKUP_FILE}"; \
-    else \
-      echo "No local state files found under ${TF_DIR}; skipping backup archive."; \
-    fi; \
-    ./scripts/toolchain.sh "TF_VAR_cloud_provider=${P} tofu -chdir=${TF_DIR} destroy"
+    ./scripts/toolchain.sh "python3 -m hermes_vps_app.cli destroy --repo-root . --provider ${P} --approve-destructive DESTROY:${P}"
+
+# Compatibility alias for destroy
+down CONFIRM="NO" PROVIDER_ARG="":
+    @just destroy CONFIRM={{ CONFIRM }} PROVIDER_ARG={{ PROVIDER_ARG }}
 
 # Run post-provision bootstrap scripts over SSH
 bootstrap PROVIDER_ARG="": (_preflight PROVIDER_ARG)
@@ -145,128 +107,14 @@ bootstrap PROVIDER_ARG="": (_preflight PROVIDER_ARG)
     P='{{ PROVIDER }}'; \
     if [[ -z "$P" ]]; then P="${TF_VAR_cloud_provider:-}"; fi; \
     if [[ -n '{{ PROVIDER_ARG }}' ]]; then P='{{ PROVIDER_ARG }}'; P="${P#PROVIDER=}"; fi; \
-    TF_DIR="opentofu/providers/${P}"; \
-    SERVER_IP=$(./scripts/toolchain.sh "TF_VAR_cloud_provider=${P} tofu -chdir=${TF_DIR} output -raw public_ipv4"); \
-    ADMIN_USER=$(./scripts/toolchain.sh "TF_VAR_cloud_provider=${P} tofu -chdir=${TF_DIR} output -raw admin_username"); \
-    SSH_PORT="${BOOTSTRAP_SSH_PORT:-22}"; \
-    KEY_PATH_RAW="${BOOTSTRAP_SSH_PRIVATE_KEY_PATH:-}"; \
-    KEY_PATH="${KEY_PATH_RAW/#\~/$HOME}"; \
-    if [[ -z "${KEY_PATH}" ]]; then \
-      echo "ERROR: BOOTSTRAP_SSH_PRIVATE_KEY_PATH is required in .env"; \
-      exit 1; \
-    fi; \
-    if [[ ! -f "${KEY_PATH}" ]]; then \
-      echo "ERROR: SSH private key not found: ${KEY_PATH}"; \
-      exit 1; \
-    fi; \
-    if [[ ! -r "${KEY_PATH}" ]]; then \
-      echo "ERROR: SSH private key is not readable: ${KEY_PATH}"; \
-      exit 1; \
-    fi; \
-    KEY_MODE="$(stat -c '%a' "${KEY_PATH}")"; \
-    if (( (8#${KEY_MODE}) & 077 )); then \
-      echo "ERROR: SSH private key permissions are too broad (${KEY_MODE}). Fix: chmod 600 ${KEY_PATH}"; \
-      exit 1; \
-    fi; \
-    HERMES_PROVIDER_VALUE="${TF_VAR_hermes_provider:-openrouter}"; \
-    HERMES_PROVIDER_REQUIRES_AUTH_JSON="no"; \
-    case "${HERMES_PROVIDER_VALUE}" in \
-      openai-codex|nous|qwen-oauth|google-gemini-cli) HERMES_PROVIDER_REQUIRES_AUTH_JSON="yes" ;; \
-    esac; \
-    HERMES_AUTH_JSON_LOCAL="bootstrap/runtime/hermes-auth.json"; \
-    if [[ "${HERMES_PROVIDER_REQUIRES_AUTH_JSON}" == "yes" ]]; then \
-      if [[ ! -s "${HERMES_AUTH_JSON_LOCAL}" ]] && [[ -z "${HERMES_API_KEY:-}" || "${HERMES_API_KEY:-}" == "***" ]]; then \
-        echo "ERROR: OAuth provider ${HERMES_PROVIDER_VALUE} selected but no auth artifact found at ${HERMES_AUTH_JSON_LOCAL}. Run just configure and complete Hermes login."; \
-        exit 1; \
-      fi; \
-    else \
-      : "${HERMES_API_KEY:?ERROR: HERMES_API_KEY must be set in .env}"; \
-    fi; \
-    : "${HERMES_AGENT_VERSION:?ERROR: HERMES_AGENT_VERSION must be set in .env}"; \
-    : "${TELEGRAM_BOT_TOKEN:?ERROR: TELEGRAM_BOT_TOKEN must be set in .env}"; \
-    : "${TELEGRAM_ALLOWLIST_IDS:?ERROR: TELEGRAM_ALLOWLIST_IDS must be set in .env}"; \
-    RAW_ALLOWED_PORTS="${TF_VAR_allowed_tcp_ports:-[]}"; \
-    if [[ "${RAW_ALLOWED_PORTS}" =~ [\"\'\\\`\$] ]]; then \
-      echo "ERROR: TF_VAR_allowed_tcp_ports contains unsupported characters. Use numeric JSON array syntax like [443,8443]."; \
-      exit 1; \
-    fi; \
-    if ! [[ "${HERMES_AGENT_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z]+)*$ ]]; then \
-      echo "ERROR: HERMES_AGENT_VERSION must be a pinned semantic version (example: 1.5.2)."; \
-      exit 1; \
-    fi; \
-    if ! [[ "${TELEGRAM_ALLOWLIST_IDS}" =~ ^-?[0-9]+(,-?[0-9]+)*$ ]]; then \
-      echo "ERROR: TELEGRAM_ALLOWLIST_IDS must be comma-separated integers (example: 12345,-100987654321)."; \
-      exit 1; \
-    fi; \
-    cleanup_runtime() { \
-      if command -v shred >/dev/null 2>&1; then \
-        shred -u bootstrap/runtime/hermes.env bootstrap/runtime/telegram-gateway.env 2>/dev/null || true; \
-      fi; \
-      rm -f bootstrap/runtime/hermes.env bootstrap/runtime/telegram-gateway.env; \
-      rmdir bootstrap/runtime 2>/dev/null || true; \
-    }; \
-    trap cleanup_runtime EXIT; \
-    mkdir -p bootstrap/runtime; \
-    umask 077; \
-    printf '%s\n' \
-      "HERMES_MODEL=${TF_VAR_hermes_model:-anthropic/claude-sonnet-4}" \
-      "HERMES_PROVIDER=${HERMES_PROVIDER_VALUE}" \
-      "HERMES_API_KEY=${HERMES_API_KEY:-}" \
-      "HERMES_AGENT_VERSION=${HERMES_AGENT_VERSION:-}" \
-      > bootstrap/runtime/hermes.env; \
-    umask 077; \
-    printf '%s\n' \
-      "TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}" \
-      "TELEGRAM_ALLOWLIST_IDS=${TELEGRAM_ALLOWLIST_IDS:-}" \
-      "TELEGRAM_POLL_TIMEOUT=${TELEGRAM_POLL_TIMEOUT:-30}" \
-      "HERMES_COMMAND=/usr/local/bin/hermes" \
-      "HERMES_SYSTEM_PROMPT=You are Hermes Agent running on a personal production VPS." \
-      > bootstrap/runtime/telegram-gateway.env; \
-    ssh -i "${KEY_PATH}" -p "${SSH_PORT}" -o StrictHostKeyChecking=accept-new "${ADMIN_USER}@${SERVER_IP}" \
-      'sudo install -d -m 0700 -o root -g root /root/hermes-vps-stage'; \
-    rsync -az --delete --rsync-path="sudo rsync" --chmod=D0700,F0600 \
-      -e "ssh -i ${KEY_PATH} -p ${SSH_PORT} -o StrictHostKeyChecking=accept-new" \
-      bootstrap templates "${ADMIN_USER}@${SERVER_IP}:/root/hermes-vps-stage/"; \
-    ssh -i "${KEY_PATH}" -p "${SSH_PORT}" -o StrictHostKeyChecking=accept-new "${ADMIN_USER}@${SERVER_IP}" \
-      "sudo bash -c 'set -euo pipefail; \
-        install -d -m 0750 /etc/hermes /etc/telegram-gateway; \
-        install -m 0600 -o root -g root /root/hermes-vps-stage/bootstrap/runtime/hermes.env /etc/hermes/hermes.env; \
-        install -m 0600 -o root -g root /root/hermes-vps-stage/bootstrap/runtime/telegram-gateway.env /etc/telegram-gateway/gateway.env; \
-        bash /root/hermes-vps-stage/bootstrap/10-base.sh; \
-        TF_VAR_allowed_tcp_ports=\"${RAW_ALLOWED_PORTS}\" bash /root/hermes-vps-stage/bootstrap/20-hardening.sh; \
-        if [[ -f /root/hermes-vps-stage/bootstrap/runtime/hermes-auth.json ]]; then \
-          id -u hermes >/dev/null 2>&1 || useradd --system --create-home --home-dir /var/lib/hermes --shell /usr/sbin/nologin hermes; \
-          install -d -m 0700 -o hermes -g hermes /var/lib/hermes/.hermes; \
-          install -m 0600 -o hermes -g hermes /root/hermes-vps-stage/bootstrap/runtime/hermes-auth.json /var/lib/hermes/.hermes/auth.json; \
-        fi; \
-        HERMES_AGENT_VERSION=\"${HERMES_AGENT_VERSION}\" HERMES_AGENT_RELEASE_TAG=\"${HERMES_AGENT_RELEASE_TAG:-}\" bash /root/hermes-vps-stage/bootstrap/30-hermes.sh; \
-        bash /root/hermes-vps-stage/bootstrap/40-telegram-gateway.sh; \
-        bash /root/hermes-vps-stage/bootstrap/90-verify.sh; \
-        find /root/hermes-vps-stage/bootstrap/runtime -maxdepth 1 -type f \( -name \"*.env\" -o -name \"hermes-auth.json\" \) -exec shred -u {} + 2>/dev/null || true; \
-        rm -rf /root/hermes-vps-stage/bootstrap/runtime'"
-
+    ./scripts/toolchain.sh "python3 -m hermes_vps_app.cli bootstrap --repo-root . --provider ${P}"
 # Run remote verification checks on the provisioned server
 verify PROVIDER_ARG="": (_preflight PROVIDER_ARG)
     @set -euo pipefail; \
     P='{{ PROVIDER }}'; \
     if [[ -z "$P" ]]; then P="${TF_VAR_cloud_provider:-}"; fi; \
     if [[ -n '{{ PROVIDER_ARG }}' ]]; then P='{{ PROVIDER_ARG }}'; P="${P#PROVIDER=}"; fi; \
-    TF_DIR="opentofu/providers/${P}"; \
-    SERVER_IP=$(./scripts/toolchain.sh "TF_VAR_cloud_provider=${P} tofu -chdir=${TF_DIR} output -raw public_ipv4"); \
-    ADMIN_USER=$(./scripts/toolchain.sh "TF_VAR_cloud_provider=${P} tofu -chdir=${TF_DIR} output -raw admin_username"); \
-    SSH_PORT="${BOOTSTRAP_SSH_PORT:-22}"; \
-    KEY_PATH_RAW="${BOOTSTRAP_SSH_PRIVATE_KEY_PATH:-}"; \
-    KEY_PATH="${KEY_PATH_RAW/#\~/$HOME}"; \
-    if [[ -z "${KEY_PATH}" || ! -f "${KEY_PATH}" || ! -r "${KEY_PATH}" ]]; then \
-      echo "ERROR: readable BOOTSTRAP_SSH_PRIVATE_KEY_PATH is required."; \
-      exit 1; \
-    fi; \
-    KEY_MODE="$(stat -c '%a' "${KEY_PATH}")"; \
-    if (( (8#${KEY_MODE}) & 077 )); then \
-      echo "ERROR: SSH private key permissions are too broad (${KEY_MODE}). Fix: chmod 600 ${KEY_PATH}"; \
-      exit 1; \
-    fi; \
-    ssh -i "${KEY_PATH}" -p "${SSH_PORT}" -o StrictHostKeyChecking=accept-new "${ADMIN_USER}@${SERVER_IP}" "sudo bash /root/hermes-vps-stage/bootstrap/90-verify.sh"
+    ./scripts/toolchain.sh "python3 -m hermes_vps_app.cli verify --repo-root . --provider ${P}"
 
 # Show recent journal logs from one service or all core services
 logs SERVICE="all" PROVIDER_ARG="": (_preflight PROVIDER_ARG)
@@ -328,18 +176,17 @@ hardening-audit PROVIDER_ARG="": (_preflight PROVIDER_ARG)
       "sudo sshd -t && sudo nft list ruleset && sudo fail2ban-client status && sudo sysctl -n net.ipv4.tcp_syncookies >/dev/null"
 
 # Convenience alias: init + plan + apply
-up PROVIDER_ARG="":
+up PROVIDER_ARG="": (_preflight PROVIDER_ARG)
     @set -euo pipefail; \
-    PROVIDER='{{ PROVIDER }}' just init '{{ PROVIDER_ARG }}'; \
-    PROVIDER='{{ PROVIDER }}' just plan '{{ PROVIDER_ARG }}'; \
-    PROVIDER='{{ PROVIDER }}' just apply '{{ PROVIDER_ARG }}'
+    P='{{ PROVIDER }}'; \
+    if [[ -z "$P" ]]; then P="${TF_VAR_cloud_provider:-}"; fi; \
+    if [[ -n '{{ PROVIDER_ARG }}' ]]; then P='{{ PROVIDER_ARG }}'; P="${P#PROVIDER=}"; fi; \
+    ./scripts/toolchain.sh "python3 -m hermes_vps_app.cli up --repo-root . --provider ${P}"
 
 # Comprehensive deployment pipeline: infra + bootstrap + validation + hardening checks
-deploy PROVIDER_ARG="":
+deploy PROVIDER_ARG="": (_preflight PROVIDER_ARG)
     @set -euo pipefail; \
-    PROVIDER='{{ PROVIDER }}' just init '{{ PROVIDER_ARG }}'; \
-    PROVIDER='{{ PROVIDER }}' just plan '{{ PROVIDER_ARG }}'; \
-    PROVIDER='{{ PROVIDER }}' just apply '{{ PROVIDER_ARG }}'; \
-    PROVIDER='{{ PROVIDER }}' just bootstrap '{{ PROVIDER_ARG }}'; \
-    PROVIDER='{{ PROVIDER }}' just verify '{{ PROVIDER_ARG }}'; \
-    PROVIDER='{{ PROVIDER }}' just hardening-audit '{{ PROVIDER_ARG }}'
+    P='{{ PROVIDER }}'; \
+    if [[ -z "$P" ]]; then P="${TF_VAR_cloud_provider:-}"; fi; \
+    if [[ -n '{{ PROVIDER_ARG }}' ]]; then P='{{ PROVIDER_ARG }}'; P="${P#PROVIDER=}"; fi; \
+    ./scripts/toolchain.sh "python3 -m hermes_vps_app.cli deploy --repo-root . --provider ${P}"

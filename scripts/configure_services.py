@@ -12,11 +12,13 @@ import subprocess
 import time
 import urllib.parse
 from dataclasses import dataclass
-from typing import Callable, Protocol, final
+from typing import Callable, Literal, Protocol, final
 
 from scripts import configure_logic as logic
 from scripts.configure_state import LabeledValue, WizardState
 
+
+AuthFailureReason = Literal["token_invalid", "token_insufficient_scope", "auth_unknown"]
 
 _SECRET_PLACEHOLDER = "***"
 
@@ -50,6 +52,8 @@ class EnvStoreLike(Protocol):
 
 
 class ProviderServiceLike(Protocol):
+    def auth_probe(self, provider: str, token: str) -> None: ...
+
     def location_options(self, provider: str, token: str) -> list[LabeledValue]: ...
 
     def server_type_options(self, provider: str, location: str, token: str) -> list[LabeledValue]: ...
@@ -114,6 +118,33 @@ class ConfigureServiceError(RuntimeError):
     pass
 
 
+class CommandExecutionError(ConfigureServiceError):
+    def __init__(
+        self,
+        argv: list[str],
+        returncode: int | None,
+        stdout: str,
+        stderr: str,
+    ) -> None:
+        command = " ".join(argv)
+        message = f"command failed: {command} (exit={returncode})"
+        super().__init__(message)
+        self.argv: list[str] = argv
+        self.returncode: int | None = returncode
+        self.stdout: str = stdout
+        self.stderr: str = stderr
+
+
+class ProviderAuthError(ConfigureServiceError):
+    def __init__(
+        self,
+        reason: AuthFailureReason,
+        message: str,
+    ) -> None:
+        super().__init__(message)
+        self.reason: AuthFailureReason = reason
+
+
 @final
 class CommandRunner:
     def __init__(self, timeout_seconds: int = 12, retries: int = 0) -> None:
@@ -137,6 +168,13 @@ class CommandRunner:
                 last_error = exc
                 if attempt < self.retries:
                     continue
+                if isinstance(exc, subprocess.CalledProcessError):
+                    raise CommandExecutionError(
+                        argv=argv,
+                        returncode=exc.returncode,
+                        stdout=exc.stdout or "",
+                        stderr=exc.stderr or "",
+                    ) from exc
                 raise ConfigureServiceError(f"command failed: {' '.join(argv)} ({exc})") from exc
         raise ConfigureServiceError(f"command failed: {' '.join(argv)} ({last_error})")
 
@@ -214,6 +252,37 @@ class EnvStore:
 class ProviderService:
     def __init__(self, runner: CommandRunnerLike) -> None:
         self.runner = runner
+
+    def auth_probe(self, provider: str, token: str) -> None:
+        if provider == "hetzner":
+            self._require_binary("hcloud")
+            try:
+                self.runner.run(
+                    ["hcloud", "context", "list", "-o", "json"],
+                    env=self._env_with_secret("HCLOUD_TOKEN", token),
+                )
+            except ConfigureServiceError as exc:
+                reason = self._classify_auth_failure("hetzner", exc)
+                raise ProviderAuthError(reason, str(exc)) from exc
+            return
+
+        self._require_binary("linode-cli")
+        env = self._env_with_secret("LINODE_CLI_TOKEN", token)
+        try:
+            self.runner.run(
+                [
+                    "linode-cli",
+                    "profile",
+                    "view",
+                    "--json",
+                    "--no-defaults",
+                    "--suppress-warnings",
+                ],
+                env=env,
+            )
+        except ConfigureServiceError as exc:
+            reason = self._classify_auth_failure("linode", exc)
+            raise ProviderAuthError(reason, str(exc)) from exc
 
     def location_options(self, provider: str, token: str) -> list[LabeledValue]:
         if provider == "hetzner":
@@ -334,6 +403,38 @@ class ProviderService:
             ) from exc
 
     @staticmethod
+    def _classify_auth_failure(
+        provider: str,
+        error: Exception,
+    ) -> AuthFailureReason:
+        diagnostics = ProviderService._auth_error_diagnostics(error)
+        provider_markers: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
+            "hetzner": (
+                ("insufficient", "scope", "permission", "not allowed", "access denied"),
+                ("invalid", "unauthorized", "forbidden", "401", "403", "authentication failed"),
+            ),
+            "linode": (
+                ("insufficient", "scope", "not authorized", "permission", "access denied"),
+                ("invalid", "unauthorized", "401", "token", "authentication failed"),
+            ),
+        }
+        scope_markers, invalid_markers = provider_markers.get(provider, provider_markers["hetzner"])
+        if any(marker in diagnostics for marker in scope_markers):
+            return "token_insufficient_scope"
+        if any(marker in diagnostics for marker in invalid_markers):
+            return "token_invalid"
+        return "auth_unknown"
+
+    @staticmethod
+    def _auth_error_diagnostics(error: Exception) -> str:
+        text_parts = [str(error or "")]
+        if isinstance(error, CommandExecutionError):
+            text_parts.extend([error.stderr, error.stdout])
+            if error.returncode is not None:
+                text_parts.append(str(error.returncode))
+        return "\n".join(part for part in text_parts if part).lower()
+
+    @staticmethod
     def _require_binary(binary: str) -> None:
         if not shutil.which(binary):
             raise ConfigureServiceError(f"{binary} not found in toolchain")
@@ -362,11 +463,11 @@ class HermesService:
         try:
             out = self.runner.run(["hermes", "--version"]).stdout
         except FileNotFoundError:
-            return "v2026.4.16"
+            return "v0.10.0"
         release_match = re.search(r"\(([0-9]+\.[0-9]+\.[0-9]+(?:[.-][0-9A-Za-z]+)?)\)", out)
         if release_match:
             return f"v{release_match.group(1)}"
-        return "v2026.4.16"
+        return "v0.10.0"
 
     def provider_ids(self) -> list[str]:
         values = self._run_python_snippet(

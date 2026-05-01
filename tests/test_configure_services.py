@@ -5,9 +5,11 @@ import unittest
 from unittest import mock
 
 from scripts.configure_services import (
+    CommandExecutionError,
     CommandResult,
     ConfigureOrchestrator,
     ConfigureServiceError,
+    ProviderAuthError,
     ProviderService,
 )
 from scripts.configure_state import WizardState
@@ -63,12 +65,12 @@ class ConfigureServicesTests(unittest.TestCase):
             (root / ".env.example").write_text(
                 "TF_VAR_cloud_provider=hetzner\n"
                 "HERMES_AGENT_VERSION=0.10.0\n"
-                "HERMES_AGENT_RELEASE_TAG=v2026.4.16\n"
+                "HERMES_AGENT_RELEASE_TAG=v0.10.0\n"
             )
             (root / ".env").write_text(
                 "TF_VAR_cloud_provider=hetzner\n"
                 "HERMES_AGENT_VERSION=0.10.0\n"
-                "HERMES_AGENT_RELEASE_TAG=v2026.4.16\n"
+                "HERMES_AGENT_RELEASE_TAG=v0.10.0\n"
             )
             orchestrator = ConfigureOrchestrator(root)
             orchestrator.hermes.auth_artifact = (
@@ -199,7 +201,7 @@ class ConfigureServicesTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             orchestrator = self._make_orchestrator(pathlib.Path(tmp))
             orchestrator.hermes.bundled_version = mock.MagicMock(return_value="0.10.0")
-            orchestrator.hermes.bundled_release_tag = mock.MagicMock(return_value="v2026.4.16")
+            orchestrator.hermes.bundled_release_tag = mock.MagicMock(return_value="v0.10.0")
             orchestrator.hermes.clear_auth_artifact = mock.MagicMock()
 
             state = self._base_state()
@@ -209,8 +211,8 @@ class ConfigureServicesTests(unittest.TestCase):
 
             orchestrator.persist_hermes_step(state)
 
-            self.assertEqual(state.hermes_agent_release_tag, "v2026.4.16")
-            self.assertEqual(orchestrator.env.get("HERMES_AGENT_RELEASE_TAG"), "v2026.4.16")
+            self.assertEqual(state.hermes_agent_release_tag, "v0.10.0")
+            self.assertEqual(orchestrator.env.get("HERMES_AGENT_RELEASE_TAG"), "v0.10.0")
 
     def test_validate_hermes_api_key_setup_raises_when_no_key(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -332,6 +334,61 @@ class ConfigureServicesTests(unittest.TestCase):
             method = orchestrator.hermes_existing_auth_method_for_combo(state)
 
             self.assertEqual(method, "")
+
+    def test_auth_probe_binary_missing_is_not_reported_as_typed_auth_failure(self) -> None:
+        runner = self._ScriptedRunner([])
+        service = ProviderService(runner)
+
+        with mock.patch.object(
+            ProviderService,
+            "_require_binary",
+            side_effect=ConfigureServiceError("hcloud not found in toolchain"),
+        ):
+            with self.assertRaises(ConfigureServiceError) as ctx:
+                service.auth_probe("hetzner", "token")
+
+        self.assertNotIsInstance(ctx.exception, ProviderAuthError)
+        self.assertIn("not found", str(ctx.exception))
+
+    def test_auth_probe_hetzner_uses_read_only_context_list_probe(self) -> None:
+        runner = self._ScriptedRunner([CommandResult(stdout="[]", stderr="")])
+        service = ProviderService(runner)
+
+        with mock.patch.object(ProviderService, "_require_binary", return_value=None):
+            service.auth_probe("hetzner", "token")
+
+        self.assertEqual(runner.calls, [["hcloud", "context", "list", "-o", "json"]])
+
+    def test_auth_probe_linode_uses_provider_diagnostics_for_scope_classification(self) -> None:
+        runner = self._ScriptedRunner(
+            [
+                CommandExecutionError(
+                    argv=["linode-cli", "profile", "view"],
+                    returncode=1,
+                    stdout="",
+                    stderr="You are not authorized to perform this action",
+                )
+            ]
+        )
+        service = ProviderService(runner)
+
+        with mock.patch.object(ProviderService, "_require_binary", return_value=None):
+            with self.assertRaises(ProviderAuthError) as ctx:
+                service.auth_probe("linode", "token")
+
+        self.assertEqual(ctx.exception.reason, "token_insufficient_scope")
+
+    def test_auth_probe_linode_uses_read_only_profile_view_probe(self) -> None:
+        runner = self._ScriptedRunner([CommandResult(stdout='[{"email":"ops@example.com"}]', stderr="")])
+        service = ProviderService(runner)
+
+        with mock.patch.object(ProviderService, "_require_binary", return_value=None):
+            service.auth_probe("linode", "token")
+
+        self.assertEqual(
+            runner.calls,
+            [["linode-cli", "profile", "view", "--json", "--no-defaults", "--suppress-warnings"]],
+        )
 
     def test_linode_location_options_fail_when_profile_auth_fails(self) -> None:
         runner = self._ScriptedRunner(

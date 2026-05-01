@@ -25,10 +25,16 @@ from textual.widgets import (
 )
 from scripts.configure_async import CorrelatedTask
 from scripts.configure_flow import FlowCoordinator
+from hermes_vps_app.cloud_remediation import (
+    FailureReason,
+    remediation_for,
+    render_remediation,
+)
 from scripts.configure_services import (
     ConfigureOrchestrator,
     ConfigureOrchestratorLike,
     ConfigureServiceError,
+    ProviderAuthError,
 )
 from scripts.configure_state import (
     LabeledValue,
@@ -1267,6 +1273,7 @@ class ConfigureTUI(App[list[tuple[str, str, str]] | None]):
         server_types_only: bool,
     ) -> None:
         try:
+            self.orchestrator.provider.auth_probe(provider, token)
             locations = self.location_options
             if not server_types_only or not locations:
                 locations = self.orchestrator.provider.location_options(provider, token)
@@ -1280,28 +1287,27 @@ class ConfigureTUI(App[list[tuple[str, str, str]] | None]):
                 CloudLoaded(
                     [],
                     [],
-                    self._describe_cloud_lookup_error(provider, str(exc)),
+                    self._describe_cloud_lookup_error(provider, exc),
                     request_id=request_id,
                 )
             )
 
     @staticmethod
-    def _describe_cloud_lookup_error(provider: str, detail: str) -> str:
-        provider_name = "Hetzner" if provider == "hetzner" else "Linode"
-        compact = " ".join(detail.split())[:220]
-        lower = detail.lower()
+    def _describe_cloud_lookup_error(provider: str, error: Exception) -> str:
+        reason: FailureReason = "metadata_unavailable"
+        detail = str(error)
 
-        if "not found in toolchain" in lower:
-            return f"{provider_name} CLI not found in toolchain."
-        if "timed out" in lower or "timeout" in lower:
-            return (
-                f"Unable to validate {provider_name} API token right now (timeout). "
-                f"Please retry. ({compact})"
-            )
-        return (
-            f"Invalid {provider_name} API token. The token is invalid, expired, or missing required scope. "
-            f"Follow the token instructions above and paste a valid token. ({compact})"
-        )
+        if isinstance(error, ProviderAuthError):
+            reason = cast(FailureReason, error.reason)
+        elif "not found in toolchain" in detail.lower():
+            reason = "missing_binary"
+        elif "missing" in detail.lower() and "token" in detail.lower():
+            reason = "missing_token"
+        elif isinstance(error, ConfigureServiceError):
+            reason = "metadata_unavailable"
+
+        payload = remediation_for(provider, reason, detail)
+        return render_remediation(payload)
 
     def _load_hermes_options(
         self, models_only: bool = False, provider_override: str | None = None
