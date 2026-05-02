@@ -154,6 +154,51 @@ def test_first_run_covers_all_sections_and_review_redacts_before_atomic_apply(tm
     assert "HERMES_API_KEY=hermes-secret" in written
 
 
+def test_first_run_host_ssh_defaults_seed_missing_env_without_expanding_tilde(tmp_path: Path) -> None:
+    flow = PanelConfigFlow.first_run(tmp_path)
+
+    host = flow.host_ssh_defaults()
+
+    assert host.hostname == "hermes-vps"
+    assert host.admin_username == "hermes"
+    assert host.admin_group == "hermes-admins"
+    assert host.ssh_private_key_path == "~/.ssh/hermes-vps"
+    assert host.add_ssh_alias is True
+    assert host.ssh_alias_name == "hermes-vps"
+
+
+def test_host_ssh_validation_blocks_repo_relative_key_paths_without_filesystem_checks(tmp_path: Path) -> None:
+    flow = PanelConfigFlow.first_run(tmp_path)
+    repo_key = tmp_path / "keys" / "hermes-vps"
+
+    for bad_path in ("id_ed25519", "./id_ed25519", "keys/hermes-vps", str(repo_key)):
+        result = flow.set_host_ssh(
+            hostname="hermes-vps",
+            admin_username="hermes",
+            admin_group="hermes-admins",
+            ssh_private_key_path=bad_path,
+            add_ssh_alias=True,
+        )
+        assert result.ok is False
+        assert result.next_step == "server"
+        assert "SSH private key path must be outside the repository" in result.message
+        assert flow.current_step == "cloud"
+
+    outside_absent = tmp_path.parent / "absent-hermes-vps-key"
+    result = flow.set_host_ssh(
+        hostname="hermes-vps",
+        admin_username="hermes",
+        admin_group="hermes-admins",
+        ssh_private_key_path=str(outside_absent),
+        add_ssh_alias=False,
+    )
+    assert result.ok is True
+    assert flow.draft.server.ssh_private_key_path == str(outside_absent)
+    assert flow.draft.server.add_ssh_alias is False
+    assert flow.current_step == "hermes"
+    assert not outside_absent.exists()
+
+
 def _complete_first_run_flow(tmp_path: Path) -> PanelConfigFlow:
     flow = PanelConfigFlow.first_run(tmp_path)
     flow.draft.provider.hcloud_token = SecretDraft.replace("hcloud-secret")

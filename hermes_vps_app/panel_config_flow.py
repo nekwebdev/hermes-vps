@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+import re
 import shutil
 from typing import Literal, final
 
@@ -98,6 +99,24 @@ class CloudMetadataSyncResult:
 
 
 CloudMetadataSyncRunner = Callable[[ProviderId, str, str | None], CloudMetadataSyncResult]
+
+
+@dataclass(frozen=True)
+class HostSshDefaults:
+    hostname: str
+    admin_username: str
+    admin_group: str
+    ssh_private_key_path: str
+    add_ssh_alias: bool
+    ssh_alias_name: str = "hermes-vps"
+
+
+@dataclass(frozen=True)
+class HostSshStepResult:
+    ok: bool
+    message: str
+    next_step: ConfigStep
+
 
 @dataclass(frozen=True)
 class CloudLiveCheckResult:
@@ -361,6 +380,72 @@ class PanelConfigFlow:
         if not self.draft.server.image:
             self.draft.server.image = logic.server_image_for_provider(self.draft.provider.provider)
 
+    def host_ssh_defaults(self) -> HostSshDefaults:
+        server = self.draft.server
+        return HostSshDefaults(
+            hostname=server.hostname or "hermes-vps",
+            admin_username=server.admin_username or "hermes",
+            admin_group=server.admin_group or "hermes-admins",
+            ssh_private_key_path=server.ssh_private_key_path or "~/.ssh/hermes-vps",
+            add_ssh_alias=server.add_ssh_alias,
+        )
+
+    def set_host_ssh(
+        self,
+        *,
+        hostname: str,
+        admin_username: str,
+        admin_group: str,
+        ssh_private_key_path: str,
+        add_ssh_alias: bool,
+    ) -> HostSshStepResult:
+        errors = self.validate_host_ssh(
+            hostname=hostname,
+            admin_username=admin_username,
+            admin_group=admin_group,
+            ssh_private_key_path=ssh_private_key_path,
+        )
+        if errors:
+            return HostSshStepResult(ok=False, message="; ".join(errors), next_step="server")
+        self.draft.server.hostname = hostname.strip()
+        self.draft.server.admin_username = admin_username.strip()
+        self.draft.server.admin_group = admin_group.strip()
+        self.draft.server.ssh_private_key_path = ssh_private_key_path.strip()
+        self.draft.server.add_ssh_alias = add_ssh_alias
+        self.current_step = "hermes"
+        return HostSshStepResult(ok=True, message="Host & SSH draft saved.", next_step="hermes")
+
+    def validate_host_ssh(
+        self,
+        *,
+        hostname: str,
+        admin_username: str,
+        admin_group: str,
+        ssh_private_key_path: str,
+    ) -> tuple[str, ...]:
+        errors: list[str] = []
+        hostname_value = hostname.strip()
+        username_value = admin_username.strip()
+        group_value = admin_group.strip()
+        key_path_value = ssh_private_key_path.strip()
+        if not hostname_value:
+            errors.append("hostname is required")
+        elif not _is_valid_hostname(hostname_value):
+            errors.append("hostname must be RFC-1123 compatible")
+        if not username_value:
+            errors.append("admin username is required")
+        elif not _is_valid_unix_name(username_value):
+            errors.append("admin username must be a valid UNIX username")
+        if not group_value:
+            errors.append("admin group is required")
+        elif not _is_valid_unix_name(group_value):
+            errors.append("admin group must be a valid UNIX group name")
+        if not key_path_value:
+            errors.append("SSH private key path is required")
+        elif _is_repo_relative_or_contained(key_path_value, self.repo_root):
+            errors.append("SSH private key path must be outside the repository")
+        return tuple(errors)
+
     def set_hermes_api_key(
         self,
         *,
@@ -444,14 +529,14 @@ class PanelConfigFlow:
     def _blocking_issues(self) -> tuple[str, ...]:
         issues: list[str] = []
         issues.extend(issue.message for issue in self.env_service.validate(self.draft))
-        if not self.draft.server.hostname:
-            issues.append("hostname is required")
-        if not self.draft.server.admin_username:
-            issues.append("admin username is required")
-        if not self.draft.server.admin_group:
-            issues.append("admin group is required")
-        if not self.draft.server.ssh_private_key_path:
-            issues.append("SSH private key path is required")
+        issues.extend(
+            self.validate_host_ssh(
+                hostname=self.draft.server.hostname,
+                admin_username=self.draft.server.admin_username,
+                admin_group=self.draft.server.admin_group,
+                ssh_private_key_path=self.draft.server.ssh_private_key_path,
+            )
+        )
         if not self.draft.hermes.provider:
             issues.append("Hermes provider is required")
         if not self.draft.hermes.model:
@@ -497,6 +582,33 @@ def _provider_failure(provider: ProviderId, reason: FailureReason, detail: str) 
 
 def _cloud_live_check_fingerprint(provider: ProviderId, token: str) -> str:
     return f"provider={provider};token_present={bool(token.strip())};token_len={len(token.strip())}"
+
+
+_HOSTNAME_LABEL_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
+_UNIX_NAME_RE = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
+
+
+def _is_valid_hostname(value: str) -> bool:
+    if len(value) > 253:
+        return False
+    return all(_HOSTNAME_LABEL_RE.fullmatch(label) for label in value.split(".") if label) and ".." not in value
+
+
+def _is_valid_unix_name(value: str) -> bool:
+    return bool(_UNIX_NAME_RE.fullmatch(value))
+
+
+def _is_repo_relative_or_contained(value: str, repo_root: Path) -> bool:
+    if value.startswith("~/") or value == "~":
+        return False
+    path = Path(value)
+    if not path.is_absolute():
+        return True
+    try:
+        path.resolve(strict=False).relative_to(repo_root.resolve(strict=False))
+    except ValueError:
+        return False
+    return True
 
 
 def _default_cloud_metadata_sync(provider: ProviderId, token: str, selected_region: str | None) -> CloudMetadataSyncResult:

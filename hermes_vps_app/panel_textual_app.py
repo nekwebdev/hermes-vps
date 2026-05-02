@@ -7,9 +7,13 @@ from typing import cast, final, override
 
 from rich.text import Text
 
-from hermes_vps_app.config_model import SecretDraft
 from hermes_vps_app.cloud_remediation import ProviderId, render_remediation
-from hermes_vps_app.panel_config_flow import CloudLookupMode, CloudMetadataSyncResult, PanelConfigFlow
+from hermes_vps_app.config_model import SecretDraft
+from hermes_vps_app.panel_config_flow import (
+    CloudLookupMode,
+    CloudMetadataSyncResult,
+    PanelConfigFlow,
+)
 from hermes_vps_app.panel_shell import ControlPanelShell, InitialPanel
 from hermes_vps_app.panel_startup import PanelStartupResult
 
@@ -18,9 +22,24 @@ try:
     from textual.containers import Container, Horizontal, Vertical
     from textual.screen import ModalScreen
     from textual.timer import Timer
-    from textual.widgets import Button, Footer, Header, Input, Label, ListItem, ListView, Select, Static, TabPane, TabbedContent
+    from textual.widgets import (
+        Button,
+        Checkbox,
+        Footer,
+        Header,
+        Input,
+        Label,
+        ListItem,
+        ListView,
+        Select,
+        Static,
+        TabbedContent,
+        TabPane,
+    )
     from textual.worker import Worker, WorkerState
-except ModuleNotFoundError as exc:  # pragma: no cover - exercised only in stripped runtime environments
+except (
+    ModuleNotFoundError
+) as exc:  # pragma: no cover - exercised only in stripped runtime environments
     raise RuntimeError(
         "The Hermes native control panel requires Textual. Run through the project toolchain or install textual."
     ) from exc
@@ -41,10 +60,17 @@ def render_panel_text(
         f"Initial panel state: {shell.initial_state_label()}",
     ]
     if host_override_reason and startup_result.runner_mode == "host":
-        lines.append(f"Host override: enabled for this launch only; reason={host_override_reason}")
-        lines.append("Host override token: required only at central pre-run execution; token is never rendered or stored.")
+        lines.append(
+            f"Host override: enabled for this launch only; reason={host_override_reason}"
+        )
+        lines.append(
+            "Host override token: required only at central pre-run execution; token is never rendered or stored."
+        )
     lines.extend(startup_result.to_human_lines())
-    if initial_panel == "configuration" or startup_result.state.value == "configuration_required":
+    if (
+        initial_panel == "configuration"
+        or startup_result.state.value == "configuration_required"
+    ):
         lines.extend(_configuration_lines(shell=shell, repo_root=repo_root))
     elif initial_panel == "maintenance":
         lines.extend(_maintenance_lines(shell=shell))
@@ -70,7 +96,9 @@ class CloudTokenHelpScreen(ModalScreen[None]):
     @override
     def compose(self) -> ComposeResult:
         yield Container(
-            Static(f"How to create a {self.provider_label} token", classes="panel-title"),
+            Static(
+                f"How to create a {self.provider_label} token", classes="panel-title"
+            ),
             Static(self.help_text, id="first-run-cloud-token-help-text"),
             Button("Close", id="first-run-cloud-token-help-close", variant="primary"),
             id="first-run-cloud-token-help-dialog",
@@ -88,7 +116,7 @@ class HermesControlPanelApp(App[None]):
 
     TITLE = "Hermes VPS Control Panel"
     BINDINGS = [("q", "quit", "Quit")]
-    CLOUD_LOADING_FRAMES = tuple("⢀⣠⣴⣾⣿⣿⣿⣷⣦⣄⡀")
+    CLOUD_LOADING_FRAMES = tuple("⣠⣴⣾⣿⣿⣿⣷⣦⣄")
     CSS = """
     Screen { layout: vertical; }
     #summary { padding: 1 2; background: $surface; }
@@ -140,7 +168,11 @@ class HermesControlPanelApp(App[None]):
         yield Header(show_clock=True)
         yield Static(self._summary_text(), id="summary")
         yield Static("Ready. Choose an action.", id="action-status")
-        active = "configuration" if self.startup_result.state.value == "configuration_required" else self.panel_target
+        active = (
+            "configuration"
+            if self.startup_result.state.value == "configuration_required"
+            else self.panel_target
+        )
         with TabbedContent(initial=active, id="main-tabs"):
             with TabPane("Configuration", id="configuration"):
                 if self.config_flow.mode == "first_run":
@@ -148,15 +180,29 @@ class HermesControlPanelApp(App[None]):
                 else:
                     yield self._line_panel(
                         "Configuration",
-                        _configuration_lines(shell=self.shell, repo_root=self.repo_root),
+                        _configuration_lines(
+                            shell=self.shell, repo_root=self.repo_root
+                        ),
                         buttons=self._configuration_buttons(),
                     )
             with TabPane("Deployment", id="deployment"):
-                yield self._line_panel("Deployment", self._deployment_lines(), buttons=self._deployment_buttons())
+                yield self._line_panel(
+                    "Deployment",
+                    self._deployment_lines(),
+                    buttons=self._deployment_buttons(),
+                )
             with TabPane("Maintenance", id="maintenance"):
-                yield self._line_panel("Maintenance", self._maintenance_lines(), buttons=self._maintenance_buttons())
+                yield self._line_panel(
+                    "Maintenance",
+                    self._maintenance_lines(),
+                    buttons=self._maintenance_buttons(),
+                )
             with TabPane("Monitoring", id="monitoring"):
-                yield self._line_panel("Monitoring", self._monitoring_lines(), buttons=self._monitoring_buttons())
+                yield self._line_panel(
+                    "Monitoring",
+                    self._monitoring_lines(),
+                    buttons=self._monitoring_buttons(),
+                )
         yield Footer()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
@@ -165,6 +211,9 @@ class HermesControlPanelApp(App[None]):
             return
         if button_id == "first-run-cloud-next":
             self._advance_first_run_cloud_step()
+            return
+        if button_id == "first-run-host-ssh-next":
+            self._advance_first_run_host_ssh_step()
             return
         if button_id == "first-run-cloud-sync":
             self._sync_first_run_cloud_metadata()
@@ -183,43 +232,66 @@ class HermesControlPanelApp(App[None]):
             self._set_status(f"Configuration section selected: {section}.")
             return
         if button_id == "configuration-review-apply":
-            self._set_status("Configuration review selected. Launch full configure flow from just configure.")
+            self._set_status(
+                "Configuration review selected. Launch full configure flow from just configure."
+            )
             return
         if button_id.startswith("deployment-"):
-            self._set_status(f"Deployment action selected: {button_id.removeprefix('deployment-')}.")
+            self._set_status(
+                f"Deployment action selected: {button_id.removeprefix('deployment-')}."
+            )
             return
         if button_id.startswith("maintenance-"):
-            self._set_status(f"Maintenance action selected: {button_id.removeprefix('maintenance-')}.")
+            self._set_status(
+                f"Maintenance action selected: {button_id.removeprefix('maintenance-')}."
+            )
             return
         if button_id.startswith("monitoring-"):
-            self._set_status(f"Monitoring action selected: {button_id.removeprefix('monitoring-')}.")
+            self._set_status(
+                f"Monitoring action selected: {button_id.removeprefix('monitoring-')}."
+            )
             return
 
     def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
         worker = event.worker
-        if worker.name not in ("first-run-cloud-sync", "first-run-cloud-check") or event.state not in (
+        if worker.name not in (
+            "first-run-cloud-sync",
+            "first-run-cloud-check",
+        ) or event.state not in (
             WorkerState.SUCCESS,
             WorkerState.ERROR,
             WorkerState.CANCELLED,
         ):
             return
         if event.state == WorkerState.SUCCESS and worker.name == "first-run-cloud-sync":
-            request_id, selected_region, result = cast(tuple[int, str | None, CloudMetadataSyncResult], worker.result)
+            request_id, selected_region, result = cast(
+                tuple[int, str | None, CloudMetadataSyncResult], worker.result
+            )
             if request_id != self._cloud_metadata_sync_request_id:
                 return
             self.config_flow.record_cloud_metadata_sync_result(result)
             if result.passed:
-                self._apply_cloud_metadata_widgets(result.regions, result.server_types, result.selected_region)
-                self._set_first_run_cloud_step_status("Cloud metadata synced." if selected_region else "Cloud metadata synced.")
+                self._apply_cloud_metadata_widgets(
+                    result.regions, result.server_types, result.selected_region
+                )
+                self._set_first_run_cloud_step_status(
+                    "Cloud metadata synced."
+                    if selected_region
+                    else "Cloud metadata synced."
+                )
                 self._finish_cloud_sync_progress()
             else:
                 self._finish_cloud_sync_progress()
                 self._render_cloud_sync_failure()
             self._refresh_first_run_sidebar()
             return
-        if event.state == WorkerState.SUCCESS and worker.name == "first-run-cloud-check":
+        if (
+            event.state == WorkerState.SUCCESS
+            and worker.name == "first-run-cloud-check"
+        ):
             request_id, provider, token, region, server_type, result = cast(
-                tuple[int, ProviderId, str, str, str, CloudMetadataSyncResult], worker.result
+                tuple[int, ProviderId, str, str, str, CloudMetadataSyncResult],
+                worker.result,
             )
             if request_id != self._cloud_metadata_sync_request_id:
                 return
@@ -231,7 +303,11 @@ class HermesControlPanelApp(App[None]):
                 region=region,
                 server_type=server_type,
             ):
-                self._complete_first_run_cloud_step(provider=provider, region_value=region, server_type_value=server_type)
+                self._complete_first_run_cloud_step(
+                    provider=provider,
+                    region_value=region,
+                    server_type_value=server_type,
+                )
             else:
                 if result.passed:
                     self._set_first_run_cloud_step_status(
@@ -245,7 +321,9 @@ class HermesControlPanelApp(App[None]):
         if event.state in (WorkerState.ERROR, WorkerState.CANCELLED):
             if self._cloud_metadata_sync_loading:
                 self._finish_cloud_sync_progress()
-                self._set_first_run_cloud_step_status("Live cloud metadata sync failed. Retry Sync.", color="red")
+                self._set_first_run_cloud_step_status(
+                    "Live cloud metadata sync failed. Retry Sync.", color="red"
+                )
 
     def on_select_changed(self, event: Select.Changed) -> None:
         if event.select.id == "first-run-cloud-server-type":
@@ -294,7 +372,9 @@ class HermesControlPanelApp(App[None]):
     def _set_status(self, message: str) -> None:
         self.query_one("#action-status", Static).update(message)
 
-    def _set_first_run_cloud_step_status(self, message: str, *, color: str = "white") -> None:
+    def _set_first_run_cloud_step_status(
+        self, message: str, *, color: str = "white"
+    ) -> None:
         try:
             status = self.query_one("#first-run-cloud-step-status", Static)
             status.update(message)
@@ -307,7 +387,9 @@ class HermesControlPanelApp(App[None]):
         self._cloud_status_animation_index = 1
         self._tick_cloud_status_animation()
         if self._cloud_status_timer is None:
-            self._cloud_status_timer = self.set_interval(0.12, self._tick_cloud_status_animation)
+            self._cloud_status_timer = self.set_interval(
+                0.12, self._tick_cloud_status_animation
+            )
             return
         self._cloud_status_timer.resume()
 
@@ -321,11 +403,16 @@ class HermesControlPanelApp(App[None]):
         return "".join(frames[(start + offset) % len(frames)] for offset in range(3))
 
     def _tick_cloud_status_animation(self) -> None:
-        if not self._cloud_metadata_sync_loading or not self._cloud_status_loading_message:
+        if (
+            not self._cloud_metadata_sync_loading
+            or not self._cloud_status_loading_message
+        ):
             return
         wave = self._cloud_loading_wave()
         self._cloud_status_animation_index += 1
-        self._set_first_run_cloud_step_status(f"{wave}{self._cloud_status_loading_message}", color="rgb(1,120,212)")
+        self._set_first_run_cloud_step_status(
+            f"{wave} {self._cloud_status_loading_message}", color="rgb(1,120,212)"
+        )
 
     def _summary_text(self) -> str:
         return (
@@ -334,7 +421,9 @@ class HermesControlPanelApp(App[None]):
             f"provider={self.startup_result.provider or 'not configured'}"
         )
 
-    def _line_panel(self, title: str, lines: Iterable[str], *, buttons: Iterable[Button] = ()) -> Container:
+    def _line_panel(
+        self, title: str, lines: Iterable[str], *, buttons: Iterable[Button] = ()
+    ) -> Container:
         items = [ListItem(Label(line)) for line in lines]
         return Container(
             Vertical(
@@ -350,9 +439,15 @@ class HermesControlPanelApp(App[None]):
         self.config_flow.set_cloud(provider=provider, lookup_mode="live")
         return Container(
             Horizontal(
-                Static(self._first_run_sidebar_renderable(), id="first-run-step-sidebar"),
+                Static(
+                    self._first_run_sidebar_renderable(), id="first-run-step-sidebar"
+                ),
                 Vertical(
-                    Static("First-run configuration wizard: Cloud", id="first-run-step-title", classes="panel-title"),
+                    Static(
+                        "First-run configuration wizard: Cloud",
+                        id="first-run-step-title",
+                        classes="panel-title",
+                    ),
                     Label("Cloud provider"),
                     Select(
                         (("Hetzner", "hetzner"), ("Linode", "linode")),
@@ -364,7 +459,11 @@ class HermesControlPanelApp(App[None]):
                         Button("ⓘ", id="first-run-cloud-token-help"),
                         id="first-run-cloud-token-label-row",
                     ),
-                    Input(placeholder=f"Paste {self._provider_label(provider)} token", password=True, id="first-run-cloud-token"),
+                    Input(
+                        placeholder=f"Paste {self._provider_label(provider)} token",
+                        password=True,
+                        id="first-run-cloud-token",
+                    ),
                     Button("Sync", id="first-run-cloud-sync"),
                     Vertical(
                         Label("Region"),
@@ -373,10 +472,17 @@ class HermesControlPanelApp(App[None]):
                     ),
                     Vertical(
                         Label("Server type"),
-                        Select((), id="first-run-cloud-server-type", prompt="Sync required"),
+                        Select(
+                            (), id="first-run-cloud-server-type", prompt="Sync required"
+                        ),
                         id="first-run-cloud-server-type-section",
                     ),
-                    Button("Next: Server", id="first-run-cloud-next", variant="primary", disabled=True),
+                    Button(
+                        "Next: Host & SSH",
+                        id="first-run-cloud-next",
+                        variant="primary",
+                        disabled=True,
+                    ),
                     Static("", id="first-run-cloud-step-status"),
                     Static("", id="first-run-cloud-summary"),
                     classes="panel-body",
@@ -427,20 +533,26 @@ class HermesControlPanelApp(App[None]):
 
     def _refresh_cloud_provider_help(self, provider: ProviderId) -> None:
         try:
-            self.query_one("#first-run-cloud-provider-help", Static).update(self._cloud_provider_help_text(provider))
+            self.query_one("#first-run-cloud-provider-help", Static).update(
+                self._cloud_provider_help_text(provider)
+            )
         except Exception:
             return
 
     def _first_run_sidebar_renderable(self) -> Text:
         labels: dict[str, str] = {
             "cloud": "Cloud",
-            "server": "Server",
+            "server": "Host & SSH",
             "hermes": "Hermes",
             "telegram": "Gateways",
             "review_apply": "Review",
         }
         current = self.config_flow.current_step or "cloud"
-        current_index = self.config_flow.steps.index(current) if current in self.config_flow.steps else 0
+        current_index = (
+            self.config_flow.steps.index(current)
+            if current in self.config_flow.steps
+            else 0
+        )
         failed_cloud = False
         result = self.config_flow.cloud_metadata_sync_result()
         if current == "cloud" and result is not None and not result.passed:
@@ -469,7 +581,9 @@ class HermesControlPanelApp(App[None]):
 
     def _refresh_first_run_sidebar(self) -> None:
         try:
-            self.query_one("#first-run-step-sidebar", Static).update(self._first_run_sidebar_renderable())
+            self.query_one("#first-run-step-sidebar", Static).update(
+                self._first_run_sidebar_renderable()
+            )
         except Exception:
             return
 
@@ -477,8 +591,13 @@ class HermesControlPanelApp(App[None]):
         result = self.config_flow.cloud_metadata_sync_result()
         if result is None or result.passed:
             return ""
-        if result.remediation and result.remediation.reason in ("missing_token", "token_invalid"):
-            prefix = "Missing" if result.remediation.reason == "missing_token" else "Wrong"
+        if result.remediation and result.remediation.reason in (
+            "missing_token",
+            "token_invalid",
+        ):
+            prefix = (
+                "Missing" if result.remediation.reason == "missing_token" else "Wrong"
+            )
             if result.remediation.provider == "linode":
                 return f"{prefix} Linode token."
             if result.remediation.provider == "hetzner":
@@ -498,7 +617,9 @@ class HermesControlPanelApp(App[None]):
                 else self.config_flow.draft.provider.linode_token
             )
             region_value = self.query_one("#first-run-cloud-region", Select).value
-            server_type_value = self.query_one("#first-run-cloud-server-type", Select).value
+            server_type_value = self.query_one(
+                "#first-run-cloud-server-type", Select
+            ).value
             complete = (
                 not self._cloud_metadata_sync_loading
                 and (bool(token) or selected_secret.present)
@@ -517,7 +638,9 @@ class HermesControlPanelApp(App[None]):
         except Exception:
             return
 
-    def _sync_first_run_cloud_metadata(self, *, selected_region: str | None = None) -> None:
+    def _sync_first_run_cloud_metadata(
+        self, *, selected_region: str | None = None
+    ) -> None:
         if self._cloud_metadata_sync_loading:
             return
         provider = self.config_flow.draft.provider.provider
@@ -529,10 +652,18 @@ class HermesControlPanelApp(App[None]):
         self._start_cloud_sync_progress(selected_region=selected_region)
 
         def run_sync() -> tuple[int, str | None, CloudMetadataSyncResult]:
-            result = self.config_flow.cloud_metadata_sync_runner(provider, token, selected_region)
+            result = self.config_flow.cloud_metadata_sync_runner(
+                provider, token, selected_region
+            )
             return request_id, selected_region, result
 
-        self.run_worker(run_sync, name="first-run-cloud-sync", group="first-run-cloud-sync", thread=True, exclusive=True)
+        self.run_worker(
+            run_sync,
+            name="first-run-cloud-sync",
+            group="first-run-cloud-sync",
+            thread=True,
+            exclusive=True,
+        )
 
     def _start_cloud_sync_progress(self, *, selected_region: str | None) -> None:
         self._cloud_metadata_sync_loading = True
@@ -548,12 +679,16 @@ class HermesControlPanelApp(App[None]):
             self.query_one("#first-run-cloud-sync", Button).disabled = True
             self.query_one("#first-run-cloud-next", Button).disabled = True
             if selected_region:
-                server_type_select = self.query_one("#first-run-cloud-server-type", Select)
+                server_type_select = self.query_one(
+                    "#first-run-cloud-server-type", Select
+                )
                 server_type_select.set_options((("Syncing...", "__syncing__"),))
                 server_type_select.value = "__syncing__"
             else:
                 region_select = self.query_one("#first-run-cloud-region", Select)
-                server_type_select = self.query_one("#first-run-cloud-server-type", Select)
+                server_type_select = self.query_one(
+                    "#first-run-cloud-server-type", Select
+                )
                 region_select.set_options((("Syncing...", "__syncing__"),))
                 server_type_select.set_options((("Syncing...", "__syncing__"),))
                 region_select.value = "__syncing__"
@@ -589,15 +724,31 @@ class HermesControlPanelApp(App[None]):
         try:
             region_select = self.query_one("#first-run-cloud-region", Select)
             server_type_select = self.query_one("#first-run-cloud-server-type", Select)
-            region_options = tuple((getattr(item, "label"), getattr(item, "value")) for item in regions)
-            server_type_options = tuple((getattr(item, "label"), getattr(item, "value")) for item in server_types)
+            region_options = tuple(
+                (getattr(item, "label"), getattr(item, "value")) for item in regions
+            )
+            server_type_options = tuple(
+                (getattr(item, "label"), getattr(item, "value"))
+                for item in server_types
+            )
             region_select.set_options(region_options)
             server_type_select.set_options(server_type_options)
             region_select.value = selected_region
-            recommended = next((getattr(item, "value") for item in server_types if getattr(item, "recommended", False)), None)
-            server_type_select.value = recommended or (getattr(server_types[0], "value") if server_types else Select.BLANK)
+            recommended = next(
+                (
+                    getattr(item, "value")
+                    for item in server_types
+                    if getattr(item, "recommended", False)
+                ),
+                None,
+            )
+            server_type_select.value = recommended or (
+                getattr(server_types[0], "value") if server_types else Select.BLANK
+            )
             self.query_one("#first-run-cloud-region-section").styles.display = "block"
-            self.query_one("#first-run-cloud-server-type-section").styles.display = "block"
+            self.query_one(
+                "#first-run-cloud-server-type-section"
+            ).styles.display = "block"
             self._refresh_first_run_cloud_next_state()
         except Exception:
             return
@@ -611,7 +762,9 @@ class HermesControlPanelApp(App[None]):
             region_select.value = Select.BLANK
             server_type_select.value = Select.BLANK
             self.query_one("#first-run-cloud-region-section").styles.display = "none"
-            self.query_one("#first-run-cloud-server-type-section").styles.display = "none"
+            self.query_one(
+                "#first-run-cloud-server-type-section"
+            ).styles.display = "none"
             self._set_first_run_cloud_step_status(result_text)
             token_input = self.query_one("#first-run-cloud-token", Input)
             token_input.placeholder = f"Paste {self._provider_label(self.config_flow.draft.provider.provider)} token"
@@ -620,7 +773,9 @@ class HermesControlPanelApp(App[None]):
             return
 
     def _render_cloud_sync_failure(self) -> None:
-        self._set_first_run_cloud_step_status(self._cloud_sync_result_text(), color="red")
+        self._set_first_run_cloud_step_status(
+            self._cloud_sync_result_text(), color="red"
+        )
         self._refresh_first_run_cloud_next_state()
 
     def _start_cloud_check_progress(self) -> None:
@@ -638,26 +793,40 @@ class HermesControlPanelApp(App[None]):
         token = self.query_one("#first-run-cloud-token", Input).value.strip()
         if token:
             if provider == "hetzner":
-                self.config_flow.draft.provider.hcloud_token = SecretDraft.replace(token)
+                self.config_flow.draft.provider.hcloud_token = SecretDraft.replace(
+                    token
+                )
             else:
-                self.config_flow.draft.provider.linode_token = SecretDraft.replace(token)
+                self.config_flow.draft.provider.linode_token = SecretDraft.replace(
+                    token
+                )
         selected_secret = (
-            self.config_flow.draft.provider.hcloud_token if provider == "hetzner" else self.config_flow.draft.provider.linode_token
+            self.config_flow.draft.provider.hcloud_token
+            if provider == "hetzner"
+            else self.config_flow.draft.provider.linode_token
         )
         if not (selected_secret.replacement or selected_secret.present):
-            self._set_first_run_cloud_step_status(f"{self._provider_label(provider)} token is required before continuing.")
+            self._set_first_run_cloud_step_status(
+                f"{self._provider_label(provider)} token is required before continuing."
+            )
             return
         region_value = self.query_one("#first-run-cloud-region", Select).value
         server_type_value = self.query_one("#first-run-cloud-server-type", Select).value
         if not self.config_flow.cloud_metadata_synced:
-            self._set_first_run_cloud_step_status("Sync live cloud metadata successfully before continuing.")
+            self._set_first_run_cloud_step_status(
+                "Sync live cloud metadata successfully before continuing."
+            )
             self._refresh_first_run_sidebar()
             return
         if not isinstance(region_value, str) or not region_value:
-            self._set_first_run_cloud_step_status("Region is required before continuing.")
+            self._set_first_run_cloud_step_status(
+                "Region is required before continuing."
+            )
             return
         if not isinstance(server_type_value, str) or not server_type_value:
-            self._set_first_run_cloud_step_status("Server type is required before continuing.")
+            self._set_first_run_cloud_step_status(
+                "Server type is required before continuing."
+            )
             return
         if not self.config_flow.has_valid_cloud_metadata_sync(
             provider=provider,
@@ -665,31 +834,119 @@ class HermesControlPanelApp(App[None]):
             region=region_value,
             server_type=server_type_value,
         ):
-            self._set_first_run_cloud_step_status("Sync live cloud metadata successfully before continuing.")
+            self._set_first_run_cloud_step_status(
+                "Sync live cloud metadata successfully before continuing."
+            )
             self._refresh_first_run_sidebar()
             return
         self._start_cloud_check_progress()
         self._cloud_metadata_sync_request_id += 1
         request_id = self._cloud_metadata_sync_request_id
 
-        def run_check() -> tuple[int, ProviderId, str, str, str, CloudMetadataSyncResult]:
-            result = self.config_flow.cloud_metadata_sync_runner(provider, token, region_value)
+        def run_check() -> (
+            tuple[int, ProviderId, str, str, str, CloudMetadataSyncResult]
+        ):
+            result = self.config_flow.cloud_metadata_sync_runner(
+                provider, token, region_value
+            )
             return request_id, provider, token, region_value, server_type_value, result
 
-        self.run_worker(run_check, name="first-run-cloud-check", group="first-run-cloud-sync", thread=True, exclusive=True)
+        self.run_worker(
+            run_check,
+            name="first-run-cloud-check",
+            group="first-run-cloud-sync",
+            thread=True,
+            exclusive=True,
+        )
 
-    def _complete_first_run_cloud_step(self, *, provider: ProviderId, region_value: str, server_type_value: str) -> None:
+    def _complete_first_run_cloud_step(
+        self, *, provider: ProviderId, region_value: str, server_type_value: str
+    ) -> None:
         self.config_flow.set_cloud(provider=provider, lookup_mode="live")
         self.config_flow.draft.server.location = region_value
         self.config_flow.draft.server.server_type = server_type_value
         self.config_flow.current_step = "server"
-        self.query_one("#first-run-step-title", Static).update("First-run configuration wizard: Server")
         self.query_one("#first-run-cloud-summary", Static).update(
             f"Cloud complete: provider={provider}; region={region_value}; server_type={server_type_value}; server_image={self.config_flow.draft.server.image}; "
-            "token=<redacted>. Server step not implemented in this chunk."
+            "token=<redacted>."
         )
         self._refresh_first_run_sidebar()
-        self._set_first_run_cloud_step_status("Cloud step saved in draft. Server step ready for next chunk.")
+        self._render_first_run_host_ssh_step()
+
+    def _first_run_step_main(self) -> Vertical:
+        return self.query_one("#first-run-step-main", Vertical)
+
+    def _render_first_run_host_ssh_step(self) -> None:
+        defaults = self.config_flow.host_ssh_defaults()
+        main = self._first_run_step_main()
+        self.query_one("#first-run-step-title", Static).update(
+            "First-run configuration wizard: Host & SSH"
+        )
+        for widget_id in (
+            "first-run-cloud-provider",
+            "first-run-cloud-token-label-row",
+            "first-run-cloud-token",
+            "first-run-cloud-sync",
+            "first-run-cloud-region-section",
+            "first-run-cloud-server-type-section",
+            "first-run-cloud-next",
+            "first-run-cloud-step-status",
+        ):
+            try:
+                self.query_one(f"#{widget_id}").styles.display = "none"
+            except Exception:
+                pass
+        if self.query("#first-run-hostname"):
+            return
+        main.mount(
+            Label("Hostname"),
+            Input(value=defaults.hostname, id="first-run-hostname"),
+            Label("Admin username"),
+            Input(value=defaults.admin_username, id="first-run-admin-username"),
+            Label("Admin group"),
+            Input(value=defaults.admin_group, id="first-run-admin-group"),
+            Label("SSH private key path"),
+            Input(value=defaults.ssh_private_key_path, id="first-run-ssh-key-path"),
+            Checkbox(
+                "Configure local SSH alias “hermes-vps” at Apply",
+                value=defaults.add_ssh_alias,
+                id="first-run-ssh-alias",
+            ),
+            Static(
+                "No SSH config changes are made until Review/Apply.",
+                id="first-run-ssh-alias-helper",
+            ),
+            Button("Next: Hermes", id="first-run-host-ssh-next", variant="primary"),
+            Static("", id="first-run-host-ssh-step-status"),
+        )
+
+    def _set_first_run_host_ssh_step_status(
+        self, message: str, *, color: str = "white"
+    ) -> None:
+        try:
+            status = self.query_one("#first-run-host-ssh-step-status", Static)
+            status.update(message)
+            status.styles.color = color
+        except Exception:
+            return
+
+    def _advance_first_run_host_ssh_step(self) -> None:
+        result = self.config_flow.set_host_ssh(
+            hostname=self.query_one("#first-run-hostname", Input).value,
+            admin_username=self.query_one("#first-run-admin-username", Input).value,
+            admin_group=self.query_one("#first-run-admin-group", Input).value,
+            ssh_private_key_path=self.query_one("#first-run-ssh-key-path", Input).value,
+            add_ssh_alias=self.query_one("#first-run-ssh-alias", Checkbox).value,
+        )
+        if not result.ok:
+            self._set_first_run_host_ssh_step_status(result.message, color="red")
+            self._refresh_first_run_sidebar()
+            return
+        self.query_one("#first-run-step-title", Static).update(
+            "First-run configuration wizard: Hermes"
+        )
+        self._set_first_run_host_ssh_step_status(result.message)
+        self._refresh_first_run_sidebar()
 
     @staticmethod
     def _cloud_region_label(region_value: str) -> str:
@@ -707,10 +964,12 @@ class HermesControlPanelApp(App[None]):
     def _configuration_buttons(self) -> list[Button]:
         return [
             Button("Cloud", id="configuration-section-cloud"),
-            Button("Server", id="configuration-section-server"),
+            Button("Host & SSH", id="configuration-section-server"),
             Button("Hermes", id="configuration-section-hermes"),
-            Button("Telegram", id="configuration-section-telegram"),
-            Button("Review / Apply", id="configuration-review-apply", variant="primary"),
+            Button("Gateways", id="configuration-section-telegram"),
+            Button(
+                "Review / Apply", id="configuration-review-apply", variant="primary"
+            ),
         ]
 
     def _deployment_buttons(self) -> list[Button]:
@@ -726,7 +985,9 @@ class HermesControlPanelApp(App[None]):
 
     def _maintenance_buttons(self) -> list[Button]:
         return [
-            Button("Preview Destroy", id="maintenance-preview-destroy", variant="warning"),
+            Button(
+                "Preview Destroy", id="maintenance-preview-destroy", variant="warning"
+            ),
             Button("Run Destroy", id="maintenance-run-destroy", variant="error"),
             Button("Down", id="maintenance-run-down", variant="error"),
         ]
@@ -753,7 +1014,8 @@ def _deployment_lines(*, shell: ControlPanelShell) -> list[str]:
     advanced = shell.deployment_advanced_actions()
     return [
         "Primary workflow: deploy = init -> plan -> apply -> bootstrap -> verify",
-        "Advanced actions: " + ", ".join(sorted({action.workflow for action in advanced})),
+        "Advanced actions: "
+        + ", ".join(sorted({action.workflow for action in advanced})),
         "Aggregate nodes: " + ", ".join(action.action_id for action in actions),
         "Destroy/down are intentionally absent from Deployment.",
     ]
@@ -782,8 +1044,20 @@ def _configuration_lines(*, shell: ControlPanelShell, repo_root: Path) -> list[s
     lines = [f"State: {screen['state']}", f"Mode: {screen['mode']}"]
     if "steps" in screen:
         steps = cast(Sequence[object], screen["steps"])
-        lines.append("First-run steps: " + " -> ".join(str(step) for step in steps))
+        labels = {
+            "cloud": "Cloud",
+            "server": "Host & SSH",
+            "hermes": "Hermes",
+            "telegram": "Gateways",
+            "review_apply": "Review",
+        }
+        lines.append(
+            "First-run steps: "
+            + " -> ".join(labels.get(str(step), str(step)) for step in steps)
+        )
     if "sections" in screen:
         sections = cast(Sequence[object], screen["sections"])
-        lines.append("Reconfigure sections: " + ", ".join(str(section) for section in sections))
+        lines.append(
+            "Reconfigure sections: " + ", ".join(str(section) for section in sections)
+        )
     return lines

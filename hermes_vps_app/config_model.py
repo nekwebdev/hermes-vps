@@ -66,6 +66,7 @@ class ServerConfigDraft:
     admin_group: str = ""
     ssh_private_key_path: str = ""
     ssh_port: str = "22"
+    add_ssh_alias: bool = True
 
 
 @dataclass
@@ -118,6 +119,7 @@ class ProjectConfigDraft:
                 "admin_group": self.server.admin_group,
                 "ssh_private_key_path": self.server.ssh_private_key_path,
                 "ssh_port": self.server.ssh_port,
+                "ssh_alias": "active" if self.server.add_ssh_alias else "inactive",
             },
             "hermes": {
                 "provider": self.hermes.provider,
