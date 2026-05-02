@@ -199,6 +199,73 @@ def test_host_ssh_validation_blocks_repo_relative_key_paths_without_filesystem_c
     assert not outside_absent.exists()
 
 
+def test_first_run_hermes_defaults_use_placeholder_version_provider_model_and_oauth(tmp_path: Path) -> None:
+    flow = PanelConfigFlow.first_run(tmp_path)
+
+    defaults = flow.hermes_defaults()
+
+    assert defaults.version_options == (("0.10.0", "v2026.4.16"),)
+    assert defaults.agent_version == "0.10.0"
+    assert defaults.agent_release_tag == "v2026.4.16"
+    assert defaults.provider_options == ("openai-codex", "anthropic")
+    assert defaults.provider == "openai-codex"
+    assert defaults.model_options == ("gpt-5.4-mini", "gpt-5.4")
+    assert defaults.model == "gpt-5.4-mini"
+    assert defaults.auth_methods == ("oauth", "api_key")
+    assert defaults.auth_method == "oauth"
+
+
+def test_hermes_next_oauth_captures_version_tag_and_advances_to_gateways_without_writes(tmp_path: Path) -> None:
+    flow = PanelConfigFlow.first_run(tmp_path)
+    flow.current_step = "hermes"
+
+    result = flow.set_hermes(
+        agent_version="0.10.0",
+        provider="anthropic",
+        model="anthropic/claude-opus-4",
+        auth_method="oauth",
+        api_key="",
+    )
+
+    assert result.ok is True
+    assert result.message == "Hermes draft saved."
+    assert result.next_step == "telegram"
+    assert flow.current_step == "telegram"
+    assert flow.draft.hermes.agent_version == "0.10.0"
+    assert flow.draft.hermes.agent_release_tag == "v2026.4.16"
+    assert flow.draft.hermes.provider == "anthropic"
+    assert flow.draft.hermes.model == "anthropic/claude-opus-4"
+    assert flow.hermes_auth_mode == "oauth"
+    assert flow.draft.hermes.api_key.replacement is None
+    assert not (tmp_path / ".env").exists()
+
+
+def test_hermes_next_api_key_requires_key_when_missing_env_and_blocks_unknown_version(tmp_path: Path) -> None:
+    flow = PanelConfigFlow.first_run(tmp_path)
+
+    missing_key = flow.set_hermes(
+        agent_version="0.10.0",
+        provider="openai-codex",
+        model="gpt-5.4-mini",
+        auth_method="api_key",
+        api_key="",
+    )
+    unknown_version = flow.set_hermes(
+        agent_version="0.99.0",
+        provider="openai-codex",
+        model="gpt-5.4-mini",
+        auth_method="oauth",
+        api_key="",
+    )
+
+    assert missing_key.ok is False
+    assert "openai-codex API key is required" in missing_key.message
+    assert missing_key.next_step == "hermes"
+    assert unknown_version.ok is False
+    assert "Unknown Hermes Agent version" in unknown_version.message
+    assert flow.current_step == "cloud"
+
+
 def _complete_first_run_flow(tmp_path: Path) -> PanelConfigFlow:
     flow = PanelConfigFlow.first_run(tmp_path)
     flow.draft.provider.hcloud_token = SecretDraft.replace("hcloud-secret")

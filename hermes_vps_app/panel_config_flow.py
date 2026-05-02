@@ -32,6 +32,12 @@ _SAMPLE_OPTIONS: dict[ProviderId, tuple[tuple[str, ...], tuple[str, ...]]] = {
     "hetzner": (("fsn1", "nbg1"), ("cx22", "cx32")),
     "linode": (("us-east", "eu-central"), ("g6-standard-1", "g6-standard-2")),
 }
+_HERMES_VERSION_TAGS: dict[str, str] = {"0.10.0": "v2026.4.16"}
+_HERMES_PROVIDER_MODELS: dict[str, tuple[str, ...]] = {
+    "openai-codex": ("gpt-5.4-mini", "gpt-5.4"),
+    "anthropic": ("anthropic/claude-sonnet-4", "anthropic/claude-opus-4"),
+}
+_HERMES_AUTH_METHODS: tuple[HermesAuthMode, ...] = ("oauth", "api_key")
 
 LiveLookup = Callable[[ProviderId, str], tuple[list[str] | tuple[str, ...], list[str] | tuple[str, ...]]]
 
@@ -113,6 +119,26 @@ class HostSshDefaults:
 
 @dataclass(frozen=True)
 class HostSshStepResult:
+    ok: bool
+    message: str
+    next_step: ConfigStep
+
+
+@dataclass(frozen=True)
+class HermesDefaults:
+    version_options: tuple[tuple[str, str], ...]
+    agent_version: str
+    agent_release_tag: str
+    provider_options: tuple[str, ...]
+    provider: str
+    model_options: tuple[str, ...]
+    model: str
+    auth_methods: tuple[HermesAuthMode, ...]
+    auth_method: HermesAuthMode
+
+
+@dataclass(frozen=True)
+class HermesStepResult:
     ok: bool
     message: str
     next_step: ConfigStep
@@ -232,7 +258,7 @@ class PanelConfigFlow:
     def first_run(cls, repo_root: Path) -> PanelConfigFlow:
         flow = cls(repo_root, mode="first_run")
         flow.draft.original_env = {}
-        flow.hermes_auth_mode = "api_key"
+        flow.hermes_auth_mode = "oauth"
         return flow
 
     @classmethod
@@ -462,6 +488,92 @@ class PanelConfigFlow:
         self.draft.hermes.agent_release_tag = agent_release_tag
         self.draft.hermes.api_key = SecretDraft.replace(api_key)
 
+    def hermes_defaults(self, *, provider: str | None = None, model: str | None = None) -> HermesDefaults:
+        hermes = self.draft.hermes
+        version = hermes.agent_version if hermes.agent_version in _HERMES_VERSION_TAGS else "0.10.0"
+        provider_value = provider or hermes.provider or "openai-codex"
+        if provider_value not in _HERMES_PROVIDER_MODELS:
+            provider_value = "openai-codex"
+        model_options = _HERMES_PROVIDER_MODELS[provider_value]
+        model_value = model or hermes.model
+        if model_value not in model_options:
+            model_value = model_options[0]
+        auth_method = self.hermes_auth_mode if self.hermes_auth_mode in _HERMES_AUTH_METHODS else "oauth"
+        return HermesDefaults(
+            version_options=tuple(_HERMES_VERSION_TAGS.items()),
+            agent_version=version,
+            agent_release_tag=_HERMES_VERSION_TAGS[version],
+            provider_options=tuple(_HERMES_PROVIDER_MODELS),
+            provider=provider_value,
+            model_options=model_options,
+            model=model_value,
+            auth_methods=_HERMES_AUTH_METHODS,
+            auth_method=auth_method,
+        )
+
+    def set_hermes(
+        self,
+        *,
+        agent_version: str,
+        provider: str,
+        model: str,
+        auth_method: HermesAuthMode,
+        api_key: str,
+    ) -> HermesStepResult:
+        errors = list(
+            self.validate_hermes(
+                agent_version=agent_version,
+                provider=provider,
+                model=model,
+                auth_method=auth_method,
+                api_key=api_key,
+            )
+        )
+        if errors:
+            return HermesStepResult(ok=False, message="; ".join(errors), next_step="hermes")
+        release_tag = _HERMES_VERSION_TAGS[agent_version.strip()]
+        self.draft.hermes.agent_version = agent_version.strip()
+        self.draft.hermes.agent_release_tag = release_tag
+        self.draft.hermes.provider = provider.strip()
+        self.draft.hermes.model = model.strip()
+        self.hermes_auth_mode = auth_method
+        if auth_method == "api_key":
+            replacement = api_key.strip()
+            if replacement:
+                self.draft.hermes.api_key = SecretDraft.replace(replacement)
+        else:
+            self.draft.hermes.api_key = SecretDraft.keep_existing(False)
+        self.current_step = "telegram"
+        return HermesStepResult(ok=True, message="Hermes draft saved.", next_step="telegram")
+
+    def validate_hermes(
+        self,
+        *,
+        agent_version: str,
+        provider: str,
+        model: str,
+        auth_method: str,
+        api_key: str,
+    ) -> tuple[str, ...]:
+        errors: list[str] = []
+        version_value = agent_version.strip()
+        provider_value = provider.strip()
+        model_value = model.strip()
+        if not _SEMVER_RE.fullmatch(version_value):
+            errors.append("Hermes Agent version must be MAJOR.MINOR.PATCH")
+        elif version_value not in _HERMES_VERSION_TAGS:
+            errors.append("Unknown Hermes Agent version in placeholder version map")
+        if provider_value not in _HERMES_PROVIDER_MODELS:
+            errors.append("Hermes provider is required")
+        elif model_value not in _HERMES_PROVIDER_MODELS[provider_value]:
+            errors.append("Hermes model is required")
+        if auth_method not in _HERMES_AUTH_METHODS:
+            errors.append("Hermes auth method is required")
+        elif auth_method == "api_key" and not (api_key.strip() or self.draft.hermes.api_key.present):
+            provider_label = provider_value or "Selected provider"
+            errors.append(f"{provider_label} API key is required")
+        return tuple(errors)
+
     def set_hermes_oauth(
         self,
         *,
@@ -586,6 +698,7 @@ def _cloud_live_check_fingerprint(provider: ProviderId, token: str) -> str:
 
 _HOSTNAME_LABEL_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 _UNIX_NAME_RE = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
+_SEMVER_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
 
 
 def _is_valid_hostname(value: str) -> bool:

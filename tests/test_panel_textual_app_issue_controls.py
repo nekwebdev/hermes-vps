@@ -229,6 +229,26 @@ class PanelTextualControlsTests(unittest.IsolatedAsyncioTestCase):
                 _ = app.query_one("#first-run-cloud-sync", Button).press()
                 await pilot.pause()
                 self.assertFalse(next_button.disabled)
+                self.assertEqual(
+                    app.query_one("#first-run-cloud-provider-spacer", Static).styles.display,
+                    "block",
+                )
+                self.assertEqual(
+                    app.query_one("#first-run-cloud-token-spacer", Static).styles.display,
+                    "block",
+                )
+                self.assertEqual(
+                    app.query_one("#first-run-cloud-region-spacer", Static).styles.display,
+                    "block",
+                )
+                self.assertEqual(
+                    app.query_one("#first-run-cloud-server-type-spacer", Static).styles.display,
+                    "block",
+                )
+                self.assertLessEqual(
+                    app.query_one("#first-run-cloud-token-help", Button).styles.width.value,
+                    2,
+                )
 
                 app.query_one("#first-run-cloud-token", Input).value = "changed-token"
                 await pilot.pause()
@@ -421,16 +441,10 @@ class PanelTextualControlsTests(unittest.IsolatedAsyncioTestCase):
                     app.query_one("#first-run-step-title", Static).renderable
                 )
                 self.assertIn("Host & SSH", step_text)
-                summary_text = str(
-                    app.query_one("#first-run-cloud-summary", Static).renderable
+                self.assertEqual(
+                    app.query_one("#first-run-cloud-summary", Static).styles.display,
+                    "none",
                 )
-                self.assertIn("provider=hetzner", summary_text)
-                self.assertIn("region=nbg1", summary_text)
-                self.assertIn("server_type=cx22", summary_text)
-                self.assertIn("server_image=debian-13", summary_text)
-                self.assertIn("token=<redacted>", summary_text)
-                self.assertNotIn("token=<replacement pending>", summary_text)
-                self.assertNotIn("hcloud-secret", summary_text)
                 sidebar = app.query_one("#first-run-step-sidebar", Static)
                 sidebar_text = str(sidebar.renderable)
                 self.assertIn("✓ Cloud", sidebar_text)
@@ -996,15 +1010,10 @@ class PanelTextualControlsTests(unittest.IsolatedAsyncioTestCase):
                 _ = app.query_one("#first-run-cloud-next", Button).press()
                 await pilot.pause()
                 self.assertEqual(app.config_flow.current_step, "server")
-                summary_text = str(
-                    app.query_one("#first-run-cloud-summary", Static).renderable
+                self.assertEqual(
+                    app.query_one("#first-run-cloud-summary", Static).styles.display,
+                    "none",
                 )
-                self.assertNotIn("lookup_mode", summary_text)
-                self.assertIn("region=fsn1", summary_text)
-                self.assertIn("server_type=cx32", summary_text)
-                self.assertIn("token=<redacted>", summary_text)
-                self.assertNotIn("token=<replacement pending>", summary_text)
-                self.assertNotIn("hcloud-secret", summary_text)
 
     async def test_first_run_cloud_region_change_refreshes_live_server_types_for_selected_region(
         self,
@@ -1172,6 +1181,19 @@ class PanelTextualControlsTests(unittest.IsolatedAsyncioTestCase):
                     str(app.query_one("#first-run-host-ssh-next", Button).label),
                     "Next: Hermes",
                 )
+                self.assertEqual(
+                    app.query_one("#first-run-hostname-spacer", Static).styles.display,
+                    "block",
+                )
+                self.assertEqual(
+                    app.query_one("#first-run-ssh-key-path-spacer", Static).styles.display,
+                    "block",
+                )
+                visible_text = self._visible_first_run_step_text(app)
+                self.assertNotIn("Cloud provider", visible_text)
+                self.assertNotIn("Token", visible_text)
+                self.assertNotIn("Region", visible_text)
+                self.assertNotIn("Server type", visible_text)
 
     async def test_host_ssh_editing_next_updates_draft_and_advances_without_writes(
         self,
@@ -1235,13 +1257,11 @@ class PanelTextualControlsTests(unittest.IsolatedAsyncioTestCase):
                     "Hermes",
                     str(app.query_one("#first-run-step-title", Static).renderable),
                 )
-                self.assertIn(
-                    "Host & SSH draft saved.",
-                    str(
-                        app.query_one(
-                            "#first-run-host-ssh-step-status", Static
-                        ).renderable
-                    ),
+                self.assertEqual(
+                    app.query_one(
+                        "#first-run-host-ssh-step-status", Static
+                    ).styles.display,
+                    "none",
                 )
                 self.assertFalse((root / ".env").exists())
                 self.assertFalse((root / "keys").exists())
@@ -1300,6 +1320,170 @@ class PanelTextualControlsTests(unittest.IsolatedAsyncioTestCase):
                 self.assertNotIn("SSH private key path", header_status)
                 self.assertFalse((root / ".env").exists())
                 self.assertFalse((root / "keys").exists())
+
+    async def test_hermes_defaults_render_after_host_ssh_completion(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            app = self._first_run_app_at_tmp(root)
+            app.config_flow.cloud_metadata_sync_runner = self._successful_cloud_sync
+
+            async with app.run_test() as pilot:
+                await self._advance_to_hermes(app, pilot)
+
+                self.assertEqual(app.config_flow.current_step, "hermes")
+                self.assertIn(
+                    "Hermes",
+                    str(app.query_one("#first-run-step-title", Static).renderable),
+                )
+                self.assertEqual(app.query_one("#first-run-hermes-version", Select).value, "0.10.0")
+                self.assertEqual(
+                    str(app.query_one("#first-run-hermes-release-tag", Static).renderable),
+                    "Release tag: v2026.4.16",
+                )
+                self.assertEqual(app.query_one("#first-run-hermes-provider", Select).value, "openai-codex")
+                self.assertEqual(app.query_one("#first-run-hermes-model", Select).value, "gpt-5.4-mini")
+                self.assertEqual(app.query_one("#first-run-hermes-auth-method", Select).value, "oauth")
+                self.assertEqual(str(app.query_one("#first-run-hermes-oauth-button", Button).label), "Start OAuth")
+                self.assertEqual(
+                    app.query_one("#first-run-hermes-version-spacer", Static).styles.display,
+                    "block",
+                )
+                self.assertEqual(
+                    app.query_one("#first-run-hermes-auth-method-spacer", Static).styles.display,
+                    "block",
+                )
+                visible_text = self._visible_first_run_step_text(app)
+                self.assertNotIn("Cloud provider", visible_text)
+                self.assertNotIn("Hostname", visible_text)
+                self.assertNotIn("Admin username", visible_text)
+                self.assertNotIn("SSH private key path", visible_text)
+                self.assertEqual(
+                    app.query_one("#first-run-hermes-api-key", Input).placeholder,
+                    "openai-codex API key",
+                )
+                app.query_one("#first-run-hermes-provider", Select).value = "anthropic"
+                await pilot.pause()
+                self.assertEqual(
+                    app.query_one("#first-run-hermes-api-key", Input).placeholder,
+                    "anthropic API key",
+                )
+                self.assertEqual(str(app.query_one("#first-run-hermes-next", Button).label), "Next: Gateways")
+
+    async def test_hermes_oauth_placeholder_advances_to_gateways_without_writes(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            app = self._first_run_app_at_tmp(root)
+            app.config_flow.cloud_metadata_sync_runner = self._successful_cloud_sync
+
+            async with app.run_test() as pilot:
+                await self._advance_to_hermes(app, pilot)
+                app.query_one("#first-run-hermes-provider", Select).value = "anthropic"
+                await pilot.pause()
+                app.query_one("#first-run-hermes-model", Select).value = "anthropic/claude-opus-4"
+                _ = app.query_one("#first-run-hermes-oauth-button", Button).press()
+                await pilot.pause()
+                self.assertIn(
+                    "OAuth flow will run in a later/apply-capable slice.",
+                    str(app.query_one("#first-run-hermes-oauth-output", Static).renderable),
+                )
+
+                _ = app.query_one("#first-run-hermes-next", Button).press()
+                await pilot.pause()
+
+                self.assertEqual(app.config_flow.current_step, "telegram")
+                self.assertEqual(app.config_flow.draft.hermes.provider, "anthropic")
+                self.assertEqual(app.config_flow.draft.hermes.model, "anthropic/claude-opus-4")
+                self.assertEqual(app.config_flow.draft.hermes.agent_version, "0.10.0")
+                self.assertEqual(app.config_flow.draft.hermes.agent_release_tag, "v2026.4.16")
+                self.assertIn(
+                    "Gateways",
+                    str(app.query_one("#first-run-step-title", Static).renderable),
+                )
+                self.assertFalse((root / ".env").exists())
+
+    async def test_hermes_api_key_mode_blocks_until_key_then_advances_without_writes(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            app = self._first_run_app_at_tmp(root)
+            app.config_flow.cloud_metadata_sync_runner = self._successful_cloud_sync
+
+            async with app.run_test() as pilot:
+                await self._advance_to_hermes(app, pilot)
+                app.query_one("#first-run-hermes-auth-method", Select).value = "api_key"
+                await pilot.pause()
+
+                _ = app.query_one("#first-run-hermes-next", Button).press()
+                await pilot.pause()
+                self.assertEqual(app.config_flow.current_step, "hermes")
+                self.assertIn(
+                    "openai-codex API key is required",
+                    str(app.query_one("#first-run-hermes-step-status", Static).renderable),
+                )
+
+                app.query_one("#first-run-hermes-api-key", Input).value = "hermes-secret"
+                _ = app.query_one("#first-run-hermes-next", Button).press()
+                await pilot.pause()
+
+                self.assertEqual(app.config_flow.current_step, "telegram")
+                self.assertEqual(app.config_flow.draft.hermes.api_key.replacement, "hermes-secret")
+                self.assertFalse((root / ".env").exists())
+
+    @staticmethod
+    def _successful_cloud_sync(provider: ProviderId, token: str, selected_region: str | None) -> CloudMetadataSyncResult:
+        return CloudMetadataSyncResult.success(
+            provider=provider,
+            token_fingerprint=f"provider={provider};token_present=True;token_len={len(token)}",
+            regions=(LabeledValue("Nuremberg (nbg1)", "nbg1"),),
+            server_types=(LabeledValue("cx22", "cx22"),),
+            selected_region="nbg1",
+            summary="Live cloud metadata synced.",
+        )
+
+    @staticmethod
+    def _first_run_app_at_tmp(root: Path) -> HermesControlPanelApp:
+        startup = _configuration_required_startup()
+        return HermesControlPanelApp(
+            shell=ControlPanelShell(startup_result=startup, initial_panel="configuration"),
+            repo_root=root,
+            startup_result=startup,
+            initial_panel="configuration",
+        )
+
+    async def _advance_to_hermes(self, app: HermesControlPanelApp, pilot: object) -> None:
+        pause = getattr(pilot, "pause")
+        await pause()
+        app.query_one("#first-run-cloud-token", Input).value = "hcloud-secret"
+        _ = app.query_one("#first-run-cloud-sync", Button).press()
+        await pause()
+        _ = app.query_one("#first-run-cloud-next", Button).press()
+        await pause()
+        _ = app.query_one("#first-run-host-ssh-next", Button).press()
+        await pause()
+
+    @staticmethod
+    def _visible_first_run_step_text(app: HermesControlPanelApp) -> str:
+        main = app.query_one("#first-run-step-main")
+        parts: list[str] = []
+        for widget in main.walk_children():
+            current = widget
+            hidden = False
+            while current is not None and current is not main:
+                if current.styles.display == "none":
+                    hidden = True
+                    break
+                current = current.parent
+            if hidden:
+                continue
+            renderable = getattr(widget, "renderable", None)
+            if renderable is not None:
+                parts.append(str(renderable))
+        return "\n".join(parts)
 
 
 if __name__ == "__main__":

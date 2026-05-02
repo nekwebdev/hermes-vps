@@ -130,8 +130,9 @@ class HermesControlPanelApp(App[None]):
     #first-run-config-layout { height: auto; }
     #first-run-step-sidebar { width: 22; padding: 1; border: solid $accent; margin-right: 1; }
     #first-run-step-main { width: 1fr; }
+    .first-run-spacer { height: 1; }
     #first-run-cloud-token-label-row { height: auto; margin-top: 1; }
-    #first-run-cloud-token-help { min-width: 2; width: 3; margin-left: 1; }
+    #first-run-cloud-token-help { min-width: 1; width: 2; margin-left: 1; }
     #first-run-cloud-provider { margin-bottom: 1; }
     #first-run-cloud-token { margin-bottom: 1; }
     #first-run-cloud-sync { margin-bottom: 1; }
@@ -214,6 +215,14 @@ class HermesControlPanelApp(App[None]):
             return
         if button_id == "first-run-host-ssh-next":
             self._advance_first_run_host_ssh_step()
+            return
+        if button_id == "first-run-hermes-oauth-button":
+            self._set_first_run_hermes_oauth_output(
+                "OAuth flow will run in a later/apply-capable slice."
+            )
+            return
+        if button_id == "first-run-hermes-next":
+            self._advance_first_run_hermes_step()
             return
         if button_id == "first-run-cloud-sync":
             self._sync_first_run_cloud_metadata()
@@ -326,6 +335,17 @@ class HermesControlPanelApp(App[None]):
                 )
 
     def on_select_changed(self, event: Select.Changed) -> None:
+        if event.select.id == "first-run-hermes-provider":
+            if isinstance(event.value, str):
+                self._refresh_first_run_hermes_model_options(event.value)
+            return
+        if event.select.id == "first-run-hermes-version":
+            if isinstance(event.value, str):
+                self._refresh_first_run_hermes_release_tag(event.value)
+            return
+        if event.select.id == "first-run-hermes-auth-method":
+            self._refresh_first_run_hermes_auth_section()
+            return
         if event.select.id == "first-run-cloud-server-type":
             self._refresh_first_run_cloud_next_state()
             return
@@ -449,6 +469,7 @@ class HermesControlPanelApp(App[None]):
                         classes="panel-title",
                     ),
                     Label("Cloud provider"),
+                    self._first_run_spacer("first-run-cloud-provider-spacer"),
                     Select(
                         (("Hetzner", "hetzner"), ("Linode", "linode")),
                         value=provider,
@@ -459,6 +480,7 @@ class HermesControlPanelApp(App[None]):
                         Button("ⓘ", id="first-run-cloud-token-help"),
                         id="first-run-cloud-token-label-row",
                     ),
+                    self._first_run_spacer("first-run-cloud-token-spacer"),
                     Input(
                         placeholder=f"Paste {self._provider_label(provider)} token",
                         password=True,
@@ -467,11 +489,13 @@ class HermesControlPanelApp(App[None]):
                     Button("Sync", id="first-run-cloud-sync"),
                     Vertical(
                         Label("Region"),
+                        self._first_run_spacer("first-run-cloud-region-spacer"),
                         Select((), id="first-run-cloud-region", prompt="Sync required"),
                         id="first-run-cloud-region-section",
                     ),
                     Vertical(
                         Label("Server type"),
+                        self._first_run_spacer("first-run-cloud-server-type-spacer"),
                         Select(
                             (), id="first-run-cloud-server-type", prompt="Sync required"
                         ),
@@ -866,15 +890,22 @@ class HermesControlPanelApp(App[None]):
         self.config_flow.draft.server.location = region_value
         self.config_flow.draft.server.server_type = server_type_value
         self.config_flow.current_step = "server"
-        self.query_one("#first-run-cloud-summary", Static).update(
-            f"Cloud complete: provider={provider}; region={region_value}; server_type={server_type_value}; server_image={self.config_flow.draft.server.image}; "
-            "token=<redacted>."
-        )
         self._refresh_first_run_sidebar()
         self._render_first_run_host_ssh_step()
 
     def _first_run_step_main(self) -> Vertical:
         return self.query_one("#first-run-step-main", Vertical)
+
+    @staticmethod
+    def _first_run_spacer(widget_id: str) -> Static:
+        return Static("", id=widget_id, classes="first-run-spacer")
+
+    def _hide_first_run_step_body(self) -> None:
+        main = self._first_run_step_main()
+        for child in main.children:
+            if child.id == "first-run-step-title":
+                continue
+            child.styles.display = "none"
 
     def _render_first_run_host_ssh_step(self) -> None:
         defaults = self.config_flow.host_ssh_defaults()
@@ -882,6 +913,9 @@ class HermesControlPanelApp(App[None]):
         self.query_one("#first-run-step-title", Static).update(
             "First-run configuration wizard: Host & SSH"
         )
+        if self.query("#first-run-hostname"):
+            return
+        self._hide_first_run_step_body()
         for widget_id in (
             "first-run-cloud-provider",
             "first-run-cloud-token-label-row",
@@ -891,31 +925,40 @@ class HermesControlPanelApp(App[None]):
             "first-run-cloud-server-type-section",
             "first-run-cloud-next",
             "first-run-cloud-step-status",
+            "first-run-cloud-summary",
         ):
             try:
                 self.query_one(f"#{widget_id}").styles.display = "none"
             except Exception:
                 pass
-        if self.query("#first-run-hostname"):
-            return
         main.mount(
             Label("Hostname"),
+            self._first_run_spacer("first-run-hostname-spacer"),
             Input(value=defaults.hostname, id="first-run-hostname"),
+            self._first_run_spacer("first-run-hostname-after-spacer"),
             Label("Admin username"),
+            self._first_run_spacer("first-run-admin-username-spacer"),
             Input(value=defaults.admin_username, id="first-run-admin-username"),
+            self._first_run_spacer("first-run-admin-username-after-spacer"),
             Label("Admin group"),
+            self._first_run_spacer("first-run-admin-group-spacer"),
             Input(value=defaults.admin_group, id="first-run-admin-group"),
+            self._first_run_spacer("first-run-admin-group-after-spacer"),
             Label("SSH private key path"),
+            self._first_run_spacer("first-run-ssh-key-path-spacer"),
             Input(value=defaults.ssh_private_key_path, id="first-run-ssh-key-path"),
+            self._first_run_spacer("first-run-ssh-key-path-after-spacer"),
             Checkbox(
                 "Configure local SSH alias “hermes-vps” at Apply",
                 value=defaults.add_ssh_alias,
                 id="first-run-ssh-alias",
             ),
+            self._first_run_spacer("first-run-ssh-alias-after-spacer"),
             Static(
                 "No SSH config changes are made until Review/Apply.",
                 id="first-run-ssh-alias-helper",
             ),
+            self._first_run_spacer("first-run-ssh-alias-helper-after-spacer"),
             Button("Next: Hermes", id="first-run-host-ssh-next", variant="primary"),
             Static("", id="first-run-host-ssh-step-status"),
         )
@@ -947,6 +990,168 @@ class HermesControlPanelApp(App[None]):
         )
         self._set_first_run_host_ssh_step_status(result.message)
         self._refresh_first_run_sidebar()
+        self._render_first_run_hermes_step()
+
+    def _render_first_run_hermes_step(self) -> None:
+        defaults = self.config_flow.hermes_defaults()
+        main = self._first_run_step_main()
+        if self.query("#first-run-hermes-version"):
+            return
+        self._hide_first_run_step_body()
+        for widget_id in (
+            "first-run-hostname",
+            "first-run-admin-username",
+            "first-run-admin-group",
+            "first-run-ssh-key-path",
+            "first-run-ssh-alias",
+            "first-run-ssh-alias-helper",
+            "first-run-host-ssh-next",
+            "first-run-host-ssh-step-status",
+        ):
+            try:
+                self.query_one(f"#{widget_id}").styles.display = "none"
+            except Exception:
+                pass
+        main.mount(
+            Label("Hermes Agent version"),
+            self._first_run_spacer("first-run-hermes-version-spacer"),
+            Select(
+                tuple((version, version) for version, _tag in defaults.version_options),
+                value=defaults.agent_version,
+                id="first-run-hermes-version",
+            ),
+            self._first_run_spacer("first-run-hermes-version-after-spacer"),
+            Static(
+                f"Release tag: {defaults.agent_release_tag}",
+                id="first-run-hermes-release-tag",
+            ),
+            self._first_run_spacer("first-run-hermes-release-tag-after-spacer"),
+            Label("Hermes provider"),
+            self._first_run_spacer("first-run-hermes-provider-spacer"),
+            Select(
+                tuple((provider, provider) for provider in defaults.provider_options),
+                value=defaults.provider,
+                id="first-run-hermes-provider",
+            ),
+            self._first_run_spacer("first-run-hermes-provider-after-spacer"),
+            Label("Hermes model"),
+            self._first_run_spacer("first-run-hermes-model-spacer"),
+            Select(
+                tuple((model, model) for model in defaults.model_options),
+                value=defaults.model,
+                id="first-run-hermes-model",
+            ),
+            self._first_run_spacer("first-run-hermes-model-after-spacer"),
+            Label("Auth method"),
+            self._first_run_spacer("first-run-hermes-auth-method-spacer"),
+            Select(
+                (("OAuth", "oauth"), ("API key", "api_key")),
+                value=defaults.auth_method,
+                id="first-run-hermes-auth-method",
+            ),
+            self._first_run_spacer("first-run-hermes-auth-method-after-spacer"),
+            Button("Start OAuth", id="first-run-hermes-oauth-button"),
+            self._first_run_spacer("first-run-hermes-oauth-button-after-spacer"),
+            Static("", id="first-run-hermes-oauth-output"),
+            Input(
+                placeholder=f"{defaults.provider} API key",
+                password=True,
+                id="first-run-hermes-api-key",
+            ),
+            self._first_run_spacer("first-run-hermes-api-key-after-spacer"),
+            Button("Next: Gateways", id="first-run-hermes-next", variant="primary"),
+            Static("", id="first-run-hermes-step-status"),
+        )
+        self._refresh_first_run_hermes_auth_section()
+
+    def _refresh_first_run_hermes_release_tag(self, version: str) -> None:
+        defaults = self.config_flow.hermes_defaults()
+        tag = dict(defaults.version_options).get(version, "unknown")
+        try:
+            self.query_one("#first-run-hermes-release-tag", Static).update(
+                f"Release tag: {tag}"
+            )
+        except Exception:
+            return
+
+    def _refresh_first_run_hermes_model_options(self, provider: str) -> None:
+        defaults = self.config_flow.hermes_defaults(provider=provider)
+        try:
+            model_select = self.query_one("#first-run-hermes-model", Select)
+            model_select.set_options(
+                tuple((model, model) for model in defaults.model_options)
+            )
+            model_select.value = defaults.model
+        except Exception:
+            return
+        self._refresh_first_run_hermes_auth_section()
+
+    def _refresh_first_run_hermes_auth_section(self) -> None:
+        try:
+            auth_method = self.query_one("#first-run-hermes-auth-method", Select).value
+            oauth_button = self.query_one("#first-run-hermes-oauth-button", Button)
+            oauth_output = self.query_one("#first-run-hermes-oauth-output", Static)
+            api_key = self.query_one("#first-run-hermes-api-key", Input)
+            provider = self.query_one("#first-run-hermes-provider", Select).value
+        except Exception:
+            return
+        if isinstance(provider, str) and provider:
+            api_key.placeholder = f"{provider} API key"
+        if auth_method == "api_key":
+            oauth_button.styles.display = "none"
+            oauth_output.styles.display = "none"
+            api_key.styles.display = "block"
+            return
+        oauth_button.styles.display = "block"
+        oauth_output.styles.display = "block"
+        api_key.styles.display = "none"
+
+    def _set_first_run_hermes_step_status(
+        self, message: str, *, color: str = "white"
+    ) -> None:
+        try:
+            status = self.query_one("#first-run-hermes-step-status", Static)
+            status.update(message)
+            status.styles.color = color
+        except Exception:
+            return
+
+    def _set_first_run_hermes_oauth_output(self, message: str) -> None:
+        try:
+            self.query_one("#first-run-hermes-oauth-output", Static).update(message)
+        except Exception:
+            return
+
+    def _advance_first_run_hermes_step(self) -> None:
+        version = self.query_one("#first-run-hermes-version", Select).value
+        provider = self.query_one("#first-run-hermes-provider", Select).value
+        model = self.query_one("#first-run-hermes-model", Select).value
+        auth_method = self.query_one("#first-run-hermes-auth-method", Select).value
+        api_key = self.query_one("#first-run-hermes-api-key", Input).value
+        result = self.config_flow.set_hermes(
+            agent_version=version if isinstance(version, str) else "",
+            provider=provider if isinstance(provider, str) else "",
+            model=model if isinstance(model, str) else "",
+            auth_method=cast("HermesAuthMode", auth_method)
+            if auth_method in ("oauth", "api_key")
+            else "oauth",
+            api_key=api_key,
+        )
+        if not result.ok:
+            self._set_first_run_hermes_step_status(result.message, color="red")
+            self._refresh_first_run_sidebar()
+            return
+        self._set_first_run_hermes_step_status(result.message)
+        self.query_one("#first-run-step-title", Static).update(
+            "First-run configuration wizard: Gateways"
+        )
+        self._refresh_first_run_sidebar()
+        if not self.query("#first-run-gateways-placeholder"):
+            self._first_run_step_main().mount(
+                Static(
+                    "Gateways step placeholder.", id="first-run-gateways-placeholder"
+                )
+            )
 
     @staticmethod
     def _cloud_region_label(region_value: str) -> str:
