@@ -429,7 +429,7 @@ class ConfigureTUITests(unittest.IsolatedAsyncioTestCase):
     def test_cloud_lookup_error_message_uses_typed_remediation_contract(self):
         typed_error = ProviderAuthError(
             "token_insufficient_scope",
-            "command failed: hcloud context list -o json (authorization bearer sk_live_ABC123XYZ)",
+            "command failed: hcloud server list -o json (authorization bearer sk_live_ABC123XYZ)",
         )
 
         msg = ConfigureTUI._describe_cloud_lookup_error("hetzner", typed_error)
@@ -439,7 +439,7 @@ class ConfigureTUITests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(msg, expected)
         self.assertIn("[REDACTED]", msg)
-        self.assertIn("[auth_probe] hcloud context list -o json", msg)
+        self.assertIn("[auth_probe] hcloud server list -o json", msg)
 
     async def test_server_step_keeps_env_values_when_inputs_left_blank(self):
         orchestrator = _FakeOrchestrator()

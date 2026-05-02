@@ -90,7 +90,7 @@ def _hetzner(reason: FailureReason, detail: str | None) -> CloudRemediationPaylo
     docs = "https://github.com/hetznercloud/cli"
     install = [
         "Install hcloud CLI in the active toolchain.",
-        "Set HCLOUD_TOKEN with a token that can read account/context/location/server-type metadata.",
+        "Set HCLOUD_TOKEN with a token that can read server/location/server-type metadata.",
     ]
     checks = [
         RemediationCheck(
@@ -106,7 +106,7 @@ def _hetzner(reason: FailureReason, detail: str | None) -> CloudRemediationPaylo
         ),
         RemediationCheck(
             kind="auth_probe",
-            command=["hcloud", "context", "list", "-o", "json"],
+            command=["hcloud", "server", "list", "-o", "json"],
             expected=OutcomePredicate("exit_code_eq", "0"),
         ),
         RemediationCheck(

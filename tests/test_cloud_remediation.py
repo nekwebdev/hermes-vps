@@ -28,7 +28,7 @@ class CloudRemediationTests(unittest.TestCase):
         runner = self._ScriptedRunner(
             [
                 CommandExecutionError(
-                    argv=["hcloud", "context", "list", "-o", "json"],
+                    argv=["hcloud", "server", "list", "-o", "json"],
                     returncode=1,
                     stdout="",
                     stderr="authentication failed: token invalid (401)",
@@ -66,7 +66,7 @@ class CloudRemediationTests(unittest.TestCase):
         runner = self._ScriptedRunner(
             [
                 CommandExecutionError(
-                    argv=["hcloud", "context", "list", "-o", "json"],
+                    argv=["hcloud", "server", "list", "-o", "json"],
                     returncode=1,
                     stdout="",
                     stderr="transient provider error with no auth markers",

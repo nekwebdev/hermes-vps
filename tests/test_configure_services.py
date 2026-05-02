@@ -350,14 +350,14 @@ class ConfigureServicesTests(unittest.TestCase):
         self.assertNotIsInstance(ctx.exception, ProviderAuthError)
         self.assertIn("not found", str(ctx.exception))
 
-    def test_auth_probe_hetzner_uses_read_only_context_list_probe(self) -> None:
+    def test_auth_probe_hetzner_uses_read_only_server_list_probe(self) -> None:
         runner = self._ScriptedRunner([CommandResult(stdout="[]", stderr="")])
         service = ProviderService(runner)
 
         with mock.patch.object(ProviderService, "_require_binary", return_value=None):
             service.auth_probe("hetzner", "token")
 
-        self.assertEqual(runner.calls, [["hcloud", "context", "list", "-o", "json"]])
+        self.assertEqual(runner.calls, [["hcloud", "server", "list", "-o", "json"]])
 
     def test_auth_probe_linode_uses_provider_diagnostics_for_scope_classification(self) -> None:
         runner = self._ScriptedRunner(

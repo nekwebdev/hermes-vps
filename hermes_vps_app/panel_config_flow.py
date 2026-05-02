@@ -3,7 +3,10 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+import shutil
 from typing import Literal, final
+
+from scripts.configure_services import CommandRunner, ConfigureServiceError, ProviderAuthError, ProviderService
 
 from hermes_vps_app.cloud_remediation import CloudRemediationPayload, FailureReason, ProviderId, remediation_for
 from hermes_vps_app.config_model import (
@@ -12,6 +15,7 @@ from hermes_vps_app.config_model import (
     ProjectConfigEnvService,
     SecretDraft,
 )
+from scripts.configure_state import LabeledValue
 from scripts import configure_logic as logic
 
 ConfigMode = Literal["first_run", "reconfigure"]
@@ -37,6 +41,87 @@ class CloudOptions:
     lookup_mode: CloudLookupMode
     regions: tuple[str, ...]
     server_types: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class CloudMetadataSyncResult:
+    provider: ProviderId
+    token_fingerprint: str
+    regions: tuple[LabeledValue, ...]
+    server_types: tuple[LabeledValue, ...]
+    selected_region: str
+    passed: bool
+    summary: str
+    remediation: CloudRemediationPayload | None = None
+
+    @classmethod
+    def success(
+        cls,
+        *,
+        provider: ProviderId,
+        token_fingerprint: str,
+        regions: tuple[LabeledValue, ...],
+        server_types: tuple[LabeledValue, ...],
+        selected_region: str,
+        summary: str = "Live cloud metadata synced.",
+    ) -> CloudMetadataSyncResult:
+        return cls(
+            provider=provider,
+            token_fingerprint=token_fingerprint,
+            regions=regions,
+            server_types=server_types,
+            selected_region=selected_region,
+            passed=True,
+            summary=summary,
+        )
+
+    @classmethod
+    def failure(
+        cls,
+        *,
+        provider: ProviderId,
+        token_fingerprint: str,
+        selected_region: str,
+        summary: str,
+        remediation: CloudRemediationPayload,
+    ) -> CloudMetadataSyncResult:
+        return cls(
+            provider=provider,
+            token_fingerprint=token_fingerprint,
+            regions=(),
+            server_types=(),
+            selected_region=selected_region,
+            passed=False,
+            summary=summary,
+            remediation=remediation,
+        )
+
+
+CloudMetadataSyncRunner = Callable[[ProviderId, str, str | None], CloudMetadataSyncResult]
+
+@dataclass(frozen=True)
+class CloudLiveCheckResult:
+    provider: ProviderId
+    passed: bool
+    summary: str
+    remediation: CloudRemediationPayload | None = None
+
+    @classmethod
+    def success(cls, *, provider: ProviderId, summary: str = "Live provider checks passed.") -> CloudLiveCheckResult:
+        return cls(provider=provider, passed=True, summary=summary)
+
+    @classmethod
+    def failure(
+        cls,
+        *,
+        provider: ProviderId,
+        summary: str,
+        remediation: CloudRemediationPayload,
+    ) -> CloudLiveCheckResult:
+        return cls(provider=provider, passed=False, summary=summary, remediation=remediation)
+
+
+CloudLiveCheckRunner = Callable[[ProviderId, str], CloudLiveCheckResult]
 
 
 @dataclass(frozen=True)
@@ -111,6 +196,11 @@ class PanelConfigFlow:
         self._telegram_validated_fingerprint: str | None = None
         self._telegram_validation_ok: bool = False
         self._telegram_validation_detail: str = ""
+        self.cloud_live_check_runner: CloudLiveCheckRunner = _default_cloud_live_check
+        self._cloud_live_check_result: CloudLiveCheckResult | None = None
+        self._cloud_live_check_fingerprint: str | None = None
+        self.cloud_metadata_sync_runner: CloudMetadataSyncRunner = _default_cloud_metadata_sync
+        self._cloud_metadata_sync_result: CloudMetadataSyncResult | None = None
 
     @classmethod
     def for_repo(cls, repo_root: Path) -> PanelConfigFlow:
@@ -173,9 +263,82 @@ class PanelConfigFlow:
 
     def set_cloud(self, *, provider: ProviderId, lookup_mode: CloudLookupMode) -> None:
         del lookup_mode
+        previous_provider = self.draft.provider.provider
         self.draft.change_provider(provider)
+        if previous_provider != provider:
+            self.invalidate_cloud_live_check()
+            self.invalidate_cloud_metadata_sync()
         if not self.draft.server.image:
             self.draft.server.image = logic.server_image_for_provider(provider)
+
+    def run_cloud_live_checks(self, *, provider: ProviderId, token: str) -> CloudLiveCheckResult:
+        fingerprint = _cloud_live_check_fingerprint(provider, token)
+        result = self.cloud_live_check_runner(provider, token)
+        self._cloud_live_check_result = result
+        self._cloud_live_check_fingerprint = fingerprint
+        return result
+
+    def sync_cloud_metadata(
+        self,
+        *,
+        provider: ProviderId,
+        token: str,
+        selected_region: str | None = None,
+    ) -> CloudMetadataSyncResult:
+        result = self.cloud_metadata_sync_runner(provider, token, selected_region)
+        self.record_cloud_metadata_sync_result(result)
+        return result
+
+    def record_cloud_metadata_sync_result(self, result: CloudMetadataSyncResult) -> None:
+        self._cloud_metadata_sync_result = result
+        if result.passed:
+            self.draft.server.location = result.selected_region
+            recommended = next((item.value for item in result.server_types if item.recommended), None)
+            self.draft.server.server_type = recommended or (result.server_types[0].value if result.server_types else "")
+
+    def invalidate_cloud_metadata_sync(self) -> None:
+        self._cloud_metadata_sync_result = None
+        self.draft.server.location = ""
+        self.draft.server.server_type = ""
+
+    def cloud_metadata_sync_result(self) -> CloudMetadataSyncResult | None:
+        return self._cloud_metadata_sync_result
+
+    @property
+    def cloud_metadata_synced(self) -> bool:
+        result = self._cloud_metadata_sync_result
+        return bool(result and result.passed)
+
+    def has_valid_cloud_metadata_sync(self, *, provider: ProviderId, token: str, region: str, server_type: str) -> bool:
+        result = self._cloud_metadata_sync_result
+        if not result or not result.passed:
+            return False
+        if result.provider != provider or result.token_fingerprint != _cloud_live_check_fingerprint(provider, token):
+            return False
+        if result.selected_region != region:
+            return False
+        return server_type in {item.value for item in result.server_types}
+
+    def invalidate_cloud_live_check(self) -> None:
+        self._cloud_live_check_result = None
+        self._cloud_live_check_fingerprint = None
+
+    def cloud_live_check_result(self) -> CloudLiveCheckResult | None:
+        return self._cloud_live_check_result
+
+    @property
+    def cloud_live_check_passed(self) -> bool:
+        result = self._cloud_live_check_result
+        return bool(result and result.passed)
+
+    def has_valid_cloud_live_check(self, *, provider: ProviderId, token: str) -> bool:
+        result = self._cloud_live_check_result
+        return bool(
+            result
+            and result.passed
+            and result.provider == provider
+            and self._cloud_live_check_fingerprint == _cloud_live_check_fingerprint(provider, token)
+        )
 
     def set_server(
         self,
@@ -330,6 +493,128 @@ def _provider_failure(provider: ProviderId, reason: FailureReason, detail: str) 
         detail=remediation.summary,
         remediation=remediation,
     )
+
+
+def _cloud_live_check_fingerprint(provider: ProviderId, token: str) -> str:
+    return f"provider={provider};token_present={bool(token.strip())};token_len={len(token.strip())}"
+
+
+def _default_cloud_metadata_sync(provider: ProviderId, token: str, selected_region: str | None) -> CloudMetadataSyncResult:
+    fingerprint = _cloud_live_check_fingerprint(provider, token)
+    if not token.strip():
+        remediation = remediation_for(provider, "missing_token")
+        return CloudMetadataSyncResult.failure(
+            provider=provider,
+            token_fingerprint=fingerprint,
+            selected_region=selected_region or "",
+            summary=remediation.summary,
+            remediation=remediation,
+        )
+
+    required_binary = "hcloud" if provider == "hetzner" else "linode-cli"
+    if shutil.which(required_binary) is None:
+        remediation = remediation_for(provider, "missing_binary")
+        return CloudMetadataSyncResult.failure(
+            provider=provider,
+            token_fingerprint=fingerprint,
+            selected_region=selected_region or "",
+            summary=remediation.summary,
+            remediation=remediation,
+        )
+
+    service = ProviderService(CommandRunner())
+    try:
+        service.auth_probe(provider, token)
+    except ProviderAuthError as exc:
+        remediation = remediation_for(provider, exc.reason, str(exc))
+        return CloudMetadataSyncResult.failure(
+            provider=provider,
+            token_fingerprint=fingerprint,
+            selected_region=selected_region or "",
+            summary=remediation.summary,
+            remediation=remediation,
+        )
+
+    try:
+        regions = tuple(service.location_options(provider, token))
+    except ConfigureServiceError as exc:
+        remediation = remediation_for(provider, "metadata_unavailable", str(exc))
+        return CloudMetadataSyncResult.failure(
+            provider=provider,
+            token_fingerprint=fingerprint,
+            selected_region=selected_region or "",
+            summary=remediation.summary,
+            remediation=remediation,
+        )
+    if not regions:
+        remediation = remediation_for(provider, "metadata_unavailable", "provider returned no regions")
+        return CloudMetadataSyncResult.failure(
+            provider=provider,
+            token_fingerprint=fingerprint,
+            selected_region=selected_region or "",
+            summary=remediation.summary,
+            remediation=remediation,
+        )
+
+    region_values = {item.value for item in regions}
+    region = selected_region if selected_region in region_values else regions[0].value
+    try:
+        server_types = tuple(service.server_type_options(provider, region, token))
+    except ConfigureServiceError as exc:
+        remediation = remediation_for(provider, "metadata_unavailable", str(exc))
+        return CloudMetadataSyncResult.failure(
+            provider=provider,
+            token_fingerprint=fingerprint,
+            selected_region=region,
+            summary=remediation.summary,
+            remediation=remediation,
+        )
+    if not server_types:
+        remediation = remediation_for(provider, "metadata_unavailable", f"provider returned no server types for region {region}")
+        return CloudMetadataSyncResult.failure(
+            provider=provider,
+            token_fingerprint=fingerprint,
+            selected_region=region,
+            summary=remediation.summary,
+            remediation=remediation,
+        )
+
+    return CloudMetadataSyncResult.success(
+        provider=provider,
+        token_fingerprint=fingerprint,
+        regions=regions,
+        server_types=server_types,
+        selected_region=region,
+    )
+
+
+def _default_cloud_live_check(provider: ProviderId, token: str) -> CloudLiveCheckResult:
+    if not token.strip():
+        remediation = remediation_for(provider, "missing_token")
+        return CloudLiveCheckResult.failure(provider=provider, summary=remediation.summary, remediation=remediation)
+
+    required_binary = "hcloud" if provider == "hetzner" else "linode-cli"
+    if shutil.which(required_binary) is None:
+        remediation = remediation_for(provider, "missing_binary")
+        return CloudLiveCheckResult.failure(provider=provider, summary=remediation.summary, remediation=remediation)
+
+    service = ProviderService(CommandRunner())
+    try:
+        service.auth_probe(provider, token)
+    except ProviderAuthError as exc:
+        remediation = remediation_for(provider, exc.reason, str(exc))
+        return CloudLiveCheckResult.failure(provider=provider, summary=remediation.summary, remediation=remediation)
+
+    try:
+        locations = service.location_options(provider, token)
+    except ConfigureServiceError as exc:
+        remediation = remediation_for(provider, "metadata_unavailable", str(exc))
+        return CloudLiveCheckResult.failure(provider=provider, summary=remediation.summary, remediation=remediation)
+    if not locations:
+        remediation = remediation_for(provider, "metadata_unavailable", "provider returned no locations")
+        return CloudLiveCheckResult.failure(provider=provider, summary=remediation.summary, remediation=remediation)
+
+    return CloudLiveCheckResult.success(provider=provider)
 
 
 def _telegram_fingerprint(token: str, allowlist_ids: str) -> str:

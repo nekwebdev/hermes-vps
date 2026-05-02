@@ -258,7 +258,7 @@ class ProviderService:
             self._require_binary("hcloud")
             try:
                 self.runner.run(
-                    ["hcloud", "context", "list", "-o", "json"],
+                    ["hcloud", "server", "list", "-o", "json"],
                     env=self._env_with_secret("HCLOUD_TOKEN", token),
                 )
             except ConfigureServiceError as exc:
