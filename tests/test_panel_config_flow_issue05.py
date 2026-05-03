@@ -6,6 +6,7 @@ from typing import cast
 import pytest
 
 from hermes_vps_app.config_model import SecretDraft
+from hermes_vps_app.hermes_live_metadata import HermesRelease, HermesRuntimeMetadata, ToolchainCacheResult
 from hermes_vps_app.panel_config_flow import (
     AsyncValidationResult,
     PanelConfigFlow,
@@ -197,6 +198,241 @@ def test_host_ssh_validation_blocks_repo_relative_key_paths_without_filesystem_c
     assert flow.draft.server.add_ssh_alias is False
     assert flow.current_step == "hermes"
     assert not outside_absent.exists()
+
+
+
+
+def test_hermes_live_metadata_sync_selects_newest_release_and_runtime_metadata(tmp_path: Path) -> None:
+    flow = PanelConfigFlow.first_run(tmp_path)
+    cache_calls: list[tuple[str, str, str]] = []
+
+    class ReleaseService:
+        def latest_releases(self, *, force_refresh: bool = False) -> tuple[HermesRelease, ...]:
+            assert force_refresh is False
+            return (
+                HermesRelease("0.12.0", "v2026.4.30", "https://example/releases/v2026.4.30"),
+                HermesRelease("0.11.0", "v2026.4.23", "https://example/releases/v2026.4.23"),
+            )
+
+    class CacheService:
+        def prepare(self, semantic_version: str, release_tag: str, *, request_id: str) -> ToolchainCacheResult:
+            cache_calls.append((semantic_version, release_tag, request_id))
+            cache_dir = tmp_path / ".cache" / "hermes-toolchain" / f"{semantic_version}-{release_tag}"
+            return ToolchainCacheResult(
+                ready=True,
+                cache_dir=cache_dir,
+                hermes_cli=cache_dir / "venv" / "bin" / "hermes",
+                semantic_version=semantic_version,
+                release_tag=release_tag,
+                git_commit="abc123",
+            )
+
+    class RuntimeService:
+        def load(self, *, cache_dir: Path, provider: str) -> HermesRuntimeMetadata:
+            assert cache_dir.name == "0.12.0-v2026.4.30"
+            assert provider == "openai-codex"
+            return HermesRuntimeMetadata(
+                providers=("anthropic", "openai-codex"),
+                models=("gpt-5.4", "gpt-5.4-mini"),
+                auth_methods=("oauth", "api_key"),
+            )
+
+    defaults = flow.sync_hermes_live_metadata(
+        release_service=ReleaseService(),
+        cache_service=CacheService(),
+        runtime_metadata_service=RuntimeService(),
+        request_id="req1",
+    )
+
+    assert defaults.version_options == (("0.12.0", "v2026.4.30"), ("0.11.0", "v2026.4.23"))
+    assert defaults.agent_version == "0.12.0"
+    assert defaults.agent_release_tag == "v2026.4.30"
+    assert defaults.provider_options == ("anthropic", "openai-codex")
+    assert defaults.provider == "openai-codex"
+    assert defaults.model_options == ("gpt-5.4", "gpt-5.4-mini")
+    assert defaults.model == "gpt-5.4-mini"
+    assert defaults.auth_methods == ("oauth", "api_key")
+    assert cache_calls == [("0.12.0", "v2026.4.30", "req1")]
+
+    result = flow.set_hermes(
+        agent_version="0.12.0",
+        provider="openai-codex",
+        model="gpt-5.4-mini",
+        auth_method="oauth",
+        api_key="",
+    )
+
+    assert result.ok is True
+    assert flow.draft.hermes.agent_release_tag == "v2026.4.30"
+
+
+def test_hermes_live_metadata_sync_keeps_configured_env_version_when_present(tmp_path: Path) -> None:
+    _ = (tmp_path / ".env").write_text(_env_text().replace("HERMES_AGENT_VERSION=0.10.0", "HERMES_AGENT_VERSION=0.11.0"), encoding="utf-8")
+    flow = PanelConfigFlow.reconfigure(tmp_path)
+    cache_calls: list[tuple[str, str, str]] = []
+
+    class ReleaseService:
+        def latest_releases(self, *, force_refresh: bool = False) -> tuple[HermesRelease, ...]:
+            return (
+                HermesRelease("0.12.0", "v2026.4.30", "https://example/releases/v2026.4.30"),
+                HermesRelease("0.11.0", "v2026.4.23", "https://example/releases/v2026.4.23"),
+            )
+
+    class CacheService:
+        def prepare(self, semantic_version: str, release_tag: str, *, request_id: str) -> ToolchainCacheResult:
+            cache_calls.append((semantic_version, release_tag, request_id))
+            cache_dir = tmp_path / ".cache" / "hermes-toolchain" / f"{semantic_version}-{release_tag}"
+            return ToolchainCacheResult(True, cache_dir, cache_dir / "venv" / "bin" / "hermes", semantic_version, release_tag, "abc123")
+
+    class RuntimeService:
+        def load(self, *, cache_dir: Path, provider: str) -> HermesRuntimeMetadata:
+            assert cache_dir.name == "0.11.0-v2026.4.23"
+            return HermesRuntimeMetadata(("openai-codex",), ("gpt-5.4-mini",), ("oauth", "api_key"))
+
+    defaults = flow.sync_hermes_live_metadata(
+        release_service=ReleaseService(),
+        cache_service=CacheService(),
+        runtime_metadata_service=RuntimeService(),
+        request_id="req-env-version",
+    )
+
+    assert defaults.agent_version == "0.11.0"
+    assert defaults.agent_release_tag == "v2026.4.23"
+    assert cache_calls == [("0.11.0", "v2026.4.23", "req-env-version")]
+
+
+def test_hermes_live_metadata_sync_uses_selected_provider_for_model_metadata(tmp_path: Path) -> None:
+    flow = PanelConfigFlow.first_run(tmp_path)
+    flow.draft.hermes.provider = "xiaomi"
+    requested_providers: list[str] = []
+
+    class ReleaseService:
+        def latest_releases(self, *, force_refresh: bool = False) -> tuple[HermesRelease, ...]:
+            return (HermesRelease("0.12.0", "v2026.4.30", "https://example/releases/v2026.4.30"),)
+
+    class CacheService:
+        def prepare(self, semantic_version: str, release_tag: str, *, request_id: str) -> ToolchainCacheResult:
+            cache_dir = tmp_path / ".cache" / "hermes-toolchain" / f"{semantic_version}-{release_tag}"
+            return ToolchainCacheResult(True, cache_dir, cache_dir / "venv" / "bin" / "hermes", semantic_version, release_tag, "abc123")
+
+    class RuntimeService:
+        def load(self, *, cache_dir: Path, provider: str) -> HermesRuntimeMetadata:
+            requested_providers.append(provider)
+            return HermesRuntimeMetadata(
+                providers=("openai-codex", "xiaomi"),
+                models=("mimo-v2-pro", "mimo-v2-flash"),
+                auth_methods=("api_key",),
+            )
+
+    defaults = flow.sync_hermes_live_metadata(
+        release_service=ReleaseService(),
+        cache_service=CacheService(),
+        runtime_metadata_service=RuntimeService(),
+        request_id="req-xiaomi",
+    )
+
+    assert requested_providers == ["xiaomi"]
+    assert defaults.provider == "xiaomi"
+    assert defaults.model_options == ("mimo-v2-pro", "mimo-v2-flash")
+    assert defaults.model == "mimo-v2-pro"
+
+
+def test_hermes_live_metadata_sync_blocks_existing_version_outside_live_list(tmp_path: Path) -> None:
+    flow = PanelConfigFlow.first_run(tmp_path)
+    flow.draft.hermes.agent_version = "0.1.0"
+
+    class ReleaseService:
+        def latest_releases(self, *, force_refresh: bool = False) -> tuple[HermesRelease, ...]:
+            return (HermesRelease("0.12.0", "v2026.4.30", "https://example"),)
+
+    try:
+        flow.sync_hermes_live_metadata(
+            release_service=ReleaseService(),
+            cache_service=object(),
+            runtime_metadata_service=object(),
+            request_id="req1",
+        )
+    except RuntimeError as exc:
+        assert "outside the current live Hermes Agent release list" in str(exc)
+    else:
+        raise AssertionError("expected RuntimeError")
+
+
+def test_hermes_live_metadata_sync_blocks_empty_runtime_provider_metadata(tmp_path: Path) -> None:
+    flow = PanelConfigFlow.first_run(tmp_path)
+
+    class ReleaseService:
+        def latest_releases(self, *, force_refresh: bool = False) -> tuple[HermesRelease, ...]:
+            return (HermesRelease("0.12.0", "v2026.4.30", "https://example"),)
+
+    class CacheService:
+        def prepare(self, semantic_version: str, release_tag: str, *, request_id: str) -> ToolchainCacheResult:
+            cache_dir = tmp_path / ".cache" / "hermes-toolchain" / f"{semantic_version}-{release_tag}"
+            return ToolchainCacheResult(
+                ready=True,
+                cache_dir=cache_dir,
+                hermes_cli=cache_dir / "venv" / "bin" / "hermes",
+                semantic_version=semantic_version,
+                release_tag=release_tag,
+                git_commit="abc123",
+            )
+
+    class RuntimeService:
+        def load(self, *, cache_dir: Path, provider: str) -> HermesRuntimeMetadata:
+            return HermesRuntimeMetadata(providers=(), models=(), auth_methods=())
+
+    try:
+        flow.sync_hermes_live_metadata(
+            release_service=ReleaseService(),
+            cache_service=CacheService(),
+            runtime_metadata_service=RuntimeService(),
+            request_id="req-empty-provider-metadata",
+        )
+    except RuntimeError as exc:
+        assert "no provider metadata" in str(exc)
+    else:
+        raise AssertionError("expected RuntimeError")
+
+
+def test_hermes_live_metadata_sync_allows_provider_without_models(tmp_path: Path) -> None:
+    flow = PanelConfigFlow.first_run(tmp_path)
+    flow.draft.hermes.provider = "lmstudio"
+
+    class ReleaseService:
+        def latest_releases(self, *, force_refresh: bool = False) -> tuple[HermesRelease, ...]:
+            return (HermesRelease("0.12.0", "v2026.4.30", "https://example"),)
+
+    class CacheService:
+        def prepare(self, semantic_version: str, release_tag: str, *, request_id: str) -> ToolchainCacheResult:
+            cache_dir = tmp_path / ".cache" / "hermes-toolchain" / f"{semantic_version}-{release_tag}"
+            return ToolchainCacheResult(True, cache_dir, cache_dir / "venv" / "bin" / "hermes", semantic_version, release_tag, "abc123")
+
+    class RuntimeService:
+        def load(self, *, cache_dir: Path, provider: str) -> HermesRuntimeMetadata:
+            assert provider == "lmstudio"
+            return HermesRuntimeMetadata(providers=("lmstudio",), models=(), auth_methods=("api_key",))
+
+    defaults = flow.sync_hermes_live_metadata(
+        release_service=ReleaseService(),
+        cache_service=CacheService(),
+        runtime_metadata_service=RuntimeService(),
+        request_id="req-empty-models",
+    )
+
+    assert defaults.provider == "lmstudio"
+    assert defaults.model_options == ()
+    assert defaults.model == ""
+
+    result = flow.set_hermes(
+        agent_version="0.12.0",
+        provider="lmstudio",
+        model="",
+        auth_method="api_key",
+        api_key="local-key",
+    )
+
+    assert result.ok is True
+    assert flow.draft.hermes.model == ""
 
 
 def test_first_run_hermes_defaults_use_placeholder_version_provider_model_and_oauth(tmp_path: Path) -> None:

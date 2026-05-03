@@ -5,6 +5,12 @@ from scripts.toolchain_guard import ToolchainRuntime, ensure_expected_toolchain_
 
 
 class ToolchainGuardTests(unittest.TestCase):
+    def test_flake_dev_shell_includes_uv_for_hermes_toolchain_cache(self):
+        from pathlib import Path
+
+        flake = Path(__file__).resolve().parents[1] / "flake.nix"
+        self.assertIn("uv", flake.read_text())
+
     def test_expected_runtime_accepts_nix_store_python(self):
         runtime = ToolchainRuntime(
             python_executable="/nix/store/abc-python3-3.12.0/bin/python3",

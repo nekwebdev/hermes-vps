@@ -54,6 +54,67 @@ TELEGRAM_POLL_TIMEOUT=30
     assert display["gateway"]["telegram_bot_token"] == "<set: keep existing>"
 
 
+def test_env_patch_omits_empty_optional_hermes_model(tmp_path: Path) -> None:
+    service = ProjectConfigEnvService(_write_repo(tmp_path, """
+TF_VAR_cloud_provider=hetzner
+HCLOUD_TOKEN=old-hcloud-secret
+TF_VAR_server_location=nbg1
+TF_VAR_server_type=cx22
+TF_VAR_server_image=debian-13
+TF_VAR_hostname=old-host
+TF_VAR_admin_username=opsadmin
+TF_VAR_admin_group=sshadmins
+BOOTSTRAP_SSH_PRIVATE_KEY_PATH=/home/me/.ssh/id_ed25519
+BOOTSTRAP_SSH_PORT=22
+TF_VAR_hermes_provider=lmstudio
+HERMES_AGENT_VERSION=0.12.0
+HERMES_AGENT_RELEASE_TAG=v2026.4.30
+HERMES_API_KEY=old-hermes-secret
+TELEGRAM_BOT_TOKEN=old-telegram-secret
+TELEGRAM_ALLOWLIST_IDS=12345
+TELEGRAM_POLL_TIMEOUT=30
+""".lstrip()))
+    draft = service.load()
+    draft.hermes.model = ""
+    draft.server.hostname = "new-host"
+
+    patch = service.create_patch(draft)
+
+    assert patch.values == {"TF_VAR_hostname": "new-host"}
+    assert "TF_VAR_hermes_model" not in patch.values
+
+
+def test_env_patch_clears_existing_hermes_model_when_provider_has_no_models(tmp_path: Path) -> None:
+    service = ProjectConfigEnvService(_write_repo(tmp_path, """
+TF_VAR_cloud_provider=hetzner
+HCLOUD_TOKEN=old-hcloud-secret
+TF_VAR_server_location=nbg1
+TF_VAR_server_type=cx22
+TF_VAR_server_image=debian-13
+TF_VAR_hostname=old-host
+TF_VAR_admin_username=opsadmin
+TF_VAR_admin_group=sshadmins
+BOOTSTRAP_SSH_PRIVATE_KEY_PATH=/home/me/.ssh/id_ed25519
+BOOTSTRAP_SSH_PORT=22
+TF_VAR_hermes_provider=openai-codex
+TF_VAR_hermes_model=gpt-5.4-mini
+HERMES_AGENT_VERSION=0.12.0
+HERMES_AGENT_RELEASE_TAG=v2026.4.30
+HERMES_API_KEY=old-hermes-secret
+TELEGRAM_BOT_TOKEN=old-telegram-secret
+TELEGRAM_ALLOWLIST_IDS=12345
+TELEGRAM_POLL_TIMEOUT=30
+""".lstrip()))
+    draft = service.load()
+    draft.hermes.provider = "lmstudio"
+    draft.hermes.model = ""
+
+    patch = service.create_patch(draft)
+
+    assert patch.values["TF_VAR_hermes_provider"] == "lmstudio"
+    assert patch.values["TF_VAR_hermes_model"] == ""
+
+
 def test_env_patch_keeps_existing_secrets_unless_replaced_and_diff_redacts(tmp_path: Path) -> None:
     service = ProjectConfigEnvService(_write_repo(tmp_path, """
 TF_VAR_cloud_provider=hetzner

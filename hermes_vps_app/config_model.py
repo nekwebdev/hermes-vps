@@ -238,6 +238,15 @@ class ProjectConfigEnvService:
             old = original.get(key, "")
             if old != new:
                 changes.append(EnvChange(key=key, old=old, new=new, secret=key in SECRET_KEYS))
+        if not draft.hermes.model and original.get("TF_VAR_hermes_model", ""):
+            changes.append(
+                EnvChange(
+                    key="TF_VAR_hermes_model",
+                    old=original["TF_VAR_hermes_model"],
+                    new="",
+                    secret=False,
+                )
+            )
         return EnvPatch(tuple(changes))
 
     def validate(self, draft: ProjectConfigDraft) -> list[ConfigValidationIssue]:
@@ -296,12 +305,13 @@ class ProjectConfigEnvService:
             "BOOTSTRAP_SSH_PRIVATE_KEY_PATH": draft.server.ssh_private_key_path,
             "BOOTSTRAP_SSH_PORT": draft.server.ssh_port,
             "TF_VAR_hermes_provider": draft.hermes.provider,
-            "TF_VAR_hermes_model": draft.hermes.model,
             "HERMES_AGENT_VERSION": draft.hermes.agent_version,
             "HERMES_AGENT_RELEASE_TAG": draft.hermes.agent_release_tag,
             "TELEGRAM_ALLOWLIST_IDS": draft.gateway.telegram_allowlist_ids,
             "TELEGRAM_POLL_TIMEOUT": draft.gateway.telegram_poll_timeout,
         }
+        if draft.hermes.model:
+            desired["TF_VAR_hermes_model"] = draft.hermes.model
         self._add_secret_if_replaced(desired, "HCLOUD_TOKEN", draft.provider.hcloud_token)
         self._add_secret_if_replaced(desired, "LINODE_TOKEN", draft.provider.linode_token)
         self._add_secret_if_replaced(desired, "HERMES_API_KEY", draft.hermes.api_key)

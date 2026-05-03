@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 import re
 import shutil
-from typing import Literal, final
+from typing import Any, Literal, cast, final
 
 from scripts.configure_services import CommandRunner, ConfigureServiceError, ProviderAuthError, ProviderService
 
@@ -18,6 +18,7 @@ from hermes_vps_app.config_model import (
 )
 from scripts.configure_state import LabeledValue
 from scripts import configure_logic as logic
+from hermes_vps_app.hermes_live_metadata import HermesRelease, HermesRuntimeMetadata, ToolchainCacheResult
 
 ConfigMode = Literal["first_run", "reconfigure"]
 ConfigStep = Literal["cloud", "server", "hermes", "telegram", "review_apply"]
@@ -246,6 +247,9 @@ class PanelConfigFlow:
         self._cloud_live_check_fingerprint: str | None = None
         self.cloud_metadata_sync_runner: CloudMetadataSyncRunner = _default_cloud_metadata_sync
         self._cloud_metadata_sync_result: CloudMetadataSyncResult | None = None
+        self._hermes_version_tags: dict[str, str] = dict(_HERMES_VERSION_TAGS)
+        self._hermes_provider_models: dict[str, tuple[str, ...]] = dict(_HERMES_PROVIDER_MODELS)
+        self._hermes_auth_methods: tuple[HermesAuthMode, ...] = _HERMES_AUTH_METHODS
 
     @classmethod
     def for_repo(cls, repo_root: Path) -> PanelConfigFlow:
@@ -490,25 +494,105 @@ class PanelConfigFlow:
 
     def hermes_defaults(self, *, provider: str | None = None, model: str | None = None) -> HermesDefaults:
         hermes = self.draft.hermes
-        version = hermes.agent_version if hermes.agent_version in _HERMES_VERSION_TAGS else "0.10.0"
+        version = hermes.agent_version if hermes.agent_version in self._hermes_version_tags else "0.10.0"
         provider_value = provider or hermes.provider or "openai-codex"
-        if provider_value not in _HERMES_PROVIDER_MODELS:
+        if provider_value not in self._hermes_provider_models:
             provider_value = "openai-codex"
-        model_options = _HERMES_PROVIDER_MODELS[provider_value]
+        model_options = self._hermes_provider_models[provider_value]
         model_value = model or hermes.model
-        if model_value not in model_options:
+        if not model_options:
+            model_value = ""
+        elif model_value not in model_options:
             model_value = model_options[0]
-        auth_method = self.hermes_auth_mode if self.hermes_auth_mode in _HERMES_AUTH_METHODS else "oauth"
+        auth_method = self.hermes_auth_mode if self.hermes_auth_mode in self._hermes_auth_methods else "oauth"
         return HermesDefaults(
-            version_options=tuple(_HERMES_VERSION_TAGS.items()),
+            version_options=tuple(self._hermes_version_tags.items()),
             agent_version=version,
-            agent_release_tag=_HERMES_VERSION_TAGS[version],
-            provider_options=tuple(_HERMES_PROVIDER_MODELS),
+            agent_release_tag=self._hermes_version_tags[version],
+            provider_options=tuple(self._hermes_provider_models),
             provider=provider_value,
             model_options=model_options,
             model=model_value,
-            auth_methods=_HERMES_AUTH_METHODS,
+            auth_methods=self._hermes_auth_methods,
             auth_method=auth_method,
+        )
+
+    def sync_hermes_live_metadata(
+        self,
+        *,
+        release_service: Any,
+        cache_service: Any,
+        runtime_metadata_service: Any,
+        request_id: str,
+        force_refresh: bool = False,
+    ) -> HermesDefaults:
+        releases: tuple[HermesRelease, ...] = tuple(
+            release_service.latest_releases(force_refresh=force_refresh)
+        )
+        if not releases:
+            raise RuntimeError("Could not load Hermes Agent releases from GitHub. Check network/GitHub access, then retry.")
+        version_options = tuple((release.semantic_version, release.release_tag) for release in releases)
+        releases_by_version = {release.semantic_version: release for release in releases}
+        existing_version = self.draft.hermes.agent_version.strip()
+        if existing_version and existing_version not in releases_by_version:
+            raise RuntimeError(
+                f"Configured Hermes Agent version {existing_version} is outside the current live Hermes Agent release list. Choose a listed version before continuing."
+            )
+        selected_release = releases_by_version[existing_version] if existing_version else releases[0]
+        cache_result: ToolchainCacheResult = cache_service.prepare(
+            selected_release.semantic_version,
+            selected_release.release_tag,
+            request_id=request_id,
+        )
+        current_provider = self.draft.hermes.provider or "openai-codex"
+        metadata: HermesRuntimeMetadata = runtime_metadata_service.load(
+            cache_dir=cache_result.cache_dir,
+            provider=current_provider,
+        )
+        provider_options = metadata.providers
+        if not provider_options:
+            raise RuntimeError(
+                "Selected Hermes returned no provider metadata. Rebuild the selected Hermes toolchain cache, then retry."
+            )
+        provider_value = current_provider if current_provider in provider_options else (
+            "openai-codex" if "openai-codex" in provider_options else provider_options[0]
+        )
+        if provider_value != current_provider:
+            metadata = runtime_metadata_service.load(cache_dir=cache_result.cache_dir, provider=provider_value)
+        if not metadata.auth_methods:
+            raise RuntimeError(
+                f"Selected Hermes returned no auth metadata for provider {provider_value}. Choose another provider or retry."
+            )
+        live_auth_methods = tuple(
+            cast(HermesAuthMode, item) for item in metadata.auth_methods if item in ("oauth", "api_key")
+        )
+        if not live_auth_methods:
+            raise RuntimeError(
+                f"Selected Hermes returned no supported auth metadata for provider {provider_value}. Choose another provider or retry."
+            )
+        self._hermes_version_tags = dict(version_options)
+        self._hermes_provider_models = {provider: () for provider in provider_options}
+        self._hermes_provider_models[provider_value] = metadata.models
+        self._hermes_auth_methods = live_auth_methods
+        if not metadata.models:
+            model_value = ""
+        else:
+            model_value = self.draft.hermes.model if self.draft.hermes.model in metadata.models else (
+                "gpt-5.4-mini" if "gpt-5.4-mini" in metadata.models else metadata.models[0]
+            )
+        auth_method = self.hermes_auth_mode if self.hermes_auth_mode in live_auth_methods else (
+            "oauth" if "oauth" in live_auth_methods else live_auth_methods[0]
+        )
+        return HermesDefaults(
+            version_options=version_options,
+            agent_version=selected_release.semantic_version,
+            agent_release_tag=selected_release.release_tag,
+            provider_options=provider_options,
+            provider=provider_value,
+            model_options=metadata.models,
+            model=model_value,
+            auth_methods=live_auth_methods,
+            auth_method=cast(HermesAuthMode, auth_method),
         )
 
     def set_hermes(
@@ -531,7 +615,7 @@ class PanelConfigFlow:
         )
         if errors:
             return HermesStepResult(ok=False, message="; ".join(errors), next_step="hermes")
-        release_tag = _HERMES_VERSION_TAGS[agent_version.strip()]
+        release_tag = self._hermes_version_tags[agent_version.strip()]
         self.draft.hermes.agent_version = agent_version.strip()
         self.draft.hermes.agent_release_tag = release_tag
         self.draft.hermes.provider = provider.strip()
@@ -561,13 +645,13 @@ class PanelConfigFlow:
         model_value = model.strip()
         if not _SEMVER_RE.fullmatch(version_value):
             errors.append("Hermes Agent version must be MAJOR.MINOR.PATCH")
-        elif version_value not in _HERMES_VERSION_TAGS:
-            errors.append("Unknown Hermes Agent version in placeholder version map")
-        if provider_value not in _HERMES_PROVIDER_MODELS:
+        elif version_value not in self._hermes_version_tags:
+            errors.append("Unknown Hermes Agent version in live version map")
+        if provider_value not in self._hermes_provider_models:
             errors.append("Hermes provider is required")
-        elif model_value not in _HERMES_PROVIDER_MODELS[provider_value]:
+        elif self._hermes_provider_models[provider_value] and model_value not in self._hermes_provider_models[provider_value]:
             errors.append("Hermes model is required")
-        if auth_method not in _HERMES_AUTH_METHODS:
+        if auth_method not in self._hermes_auth_methods:
             errors.append("Hermes auth method is required")
         elif auth_method == "api_key" and not (api_key.strip() or self.draft.hermes.api_key.present):
             provider_label = provider_value or "Selected provider"
@@ -651,7 +735,7 @@ class PanelConfigFlow:
         )
         if not self.draft.hermes.provider:
             issues.append("Hermes provider is required")
-        if not self.draft.hermes.model:
+        if not self.draft.hermes.model and self._hermes_provider_models.get(self.draft.hermes.provider, ("__requires_model__",)):
             issues.append("Hermes model is required")
         if self.hermes_auth_mode == "api_key" and not (
             self.draft.hermes.api_key.present or self.draft.hermes.api_key.replacement

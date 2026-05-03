@@ -45,6 +45,8 @@
             hcloud
             linode-cli
             basedpyright
+            uv
+            git
             pythonEnv
           ];
         };

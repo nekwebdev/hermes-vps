@@ -223,7 +223,7 @@ def validate_bootstrap_environment(*, repo_root: Path, provider: str) -> Bootstr
         telegram_bot_token=telegram_bot_token,
         telegram_allowlist_ids=telegram_allowlist_ids,
         telegram_poll_timeout=env_values.get("TELEGRAM_POLL_TIMEOUT", "30"),
-        hermes_model=env_values.get("TF_VAR_hermes_model", "anthropic/claude-sonnet-4"),
+        hermes_model=env_values.get("TF_VAR_hermes_model", "").strip(),
         hermes_agent_release_tag=env_values.get("HERMES_AGENT_RELEASE_TAG", ""),
         hermes_auth_json_path=hermes_auth_json_path,
     )
@@ -519,18 +519,14 @@ class OperationalActionHandler:
         hermes_env = runtime_dir / "hermes.env"
         telegram_env = runtime_dir / "telegram-gateway.env"
         try:
-            _ = hermes_env.write_text(
-                "\n".join(
-                    [
-                        f"HERMES_MODEL={config.hermes_model}",
-                        f"HERMES_PROVIDER={config.hermes_provider}",
-                        f"HERMES_API_KEY={config.hermes_api_key}",
-                        f"HERMES_AGENT_VERSION={config.hermes_agent_version}",
-                    ]
-                )
-                + "\n",
-                encoding="utf-8",
-            )
+            hermes_env_lines = [
+                f"HERMES_PROVIDER={config.hermes_provider}",
+                f"HERMES_API_KEY={config.hermes_api_key}",
+                f"HERMES_AGENT_VERSION={config.hermes_agent_version}",
+            ]
+            if config.hermes_model:
+                hermes_env_lines.insert(0, f"HERMES_MODEL={config.hermes_model}")
+            _ = hermes_env.write_text("\n".join(hermes_env_lines) + "\n", encoding="utf-8")
             _ = telegram_env.write_text(
                 "\n".join(
                     [

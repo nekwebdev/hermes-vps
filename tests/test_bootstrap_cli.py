@@ -117,6 +117,45 @@ class BootstrapCliTests(unittest.TestCase):
             self.assertEqual(commands[3][0], "rsync")
             self.assertEqual(commands[4][0], "ssh")
 
+    def test_bootstrap_accepts_missing_hermes_model_and_omits_runtime_model_env(self) -> None:
+        from hermes_vps_app.operational import OperationalActionHandler, validate_bootstrap_environment
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _ = self._write_valid_bootstrap_fixture(root)
+            env_path = root / ".env"
+            env_path.write_text(
+                "\n".join(
+                    line
+                    for line in env_path.read_text(encoding="utf-8").splitlines()
+                    if not line.startswith("TF_VAR_hermes_model=")
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            config = validate_bootstrap_environment(repo_root=root, provider="hetzner")
+            self.assertEqual(config.hermes_model, "")
+
+            class NoCleanupHandler(OperationalActionHandler):
+                def _cleanup_runtime(self, runtime_dir: Path) -> None:
+                    pass
+
+            runner = BootstrapRunner()
+            result = NoCleanupHandler()._execute_bootstrap_remote(
+                runner,
+                context={
+                    "repo_root": root,
+                    "bootstrap_config": config,
+                    "bootstrap_target_ip": "203.0.113.10",
+                    "bootstrap_target_user": "root",
+                },
+            )
+
+            self.assertTrue(result["ok"])
+            hermes_env = (root / "bootstrap" / "runtime" / "hermes.env").read_text(encoding="utf-8")
+            self.assertNotIn("HERMES_MODEL=", hermes_env)
+            self.assertIn("HERMES_PROVIDER=openrouter", hermes_env)
+
     def test_bootstrap_preflight_fails_on_insecure_key_permissions_before_runner_calls(self) -> None:
         from hermes_vps_app.operational import run_operational_graph
 

@@ -12,7 +12,14 @@ from hermes_vps_app.config_model import SecretDraft
 from hermes_vps_app.panel_config_flow import (
     CloudLookupMode,
     CloudMetadataSyncResult,
+    HermesAuthMode,
+    HermesDefaults,
     PanelConfigFlow,
+)
+from hermes_vps_app.hermes_live_metadata import (
+    HermesReleaseService,
+    HermesRuntimeMetadataService,
+    HermesToolchainCache,
 )
 from hermes_vps_app.panel_shell import ControlPanelShell, InitialPanel
 from hermes_vps_app.panel_startup import PanelStartupResult
@@ -163,6 +170,19 @@ class HermesControlPanelApp(App[None]):
         self._cloud_status_timer: Timer | None = None
         self._cloud_status_animation_index = 0
         self._cloud_status_loading_message = ""
+        self._hermes_status_timer: Timer | None = None
+        self._hermes_status_animation_index = 0
+        self._hermes_status_loading_message = ""
+        self._hermes_live_metadata_request_id = 0
+        self._hermes_live_metadata_loading = False
+        self._hermes_live_metadata_synced = False
+        self._applying_hermes_live_metadata = False
+        self._hermes_live_version_tags: dict[str, str] = {}
+        self.hermes_release_service = HermesReleaseService()
+        self.hermes_toolchain_cache = HermesToolchainCache(
+            root=self.repo_root / ".cache" / "hermes-toolchain"
+        )
+        self.hermes_runtime_metadata_service = HermesRuntimeMetadataService()
 
     @override
     def compose(self) -> ComposeResult:
@@ -221,6 +241,9 @@ class HermesControlPanelApp(App[None]):
                 "OAuth flow will run in a later/apply-capable slice."
             )
             return
+        if button_id == "first-run-hermes-retry":
+            self._sync_first_run_hermes_live_metadata(force_refresh=True)
+            return
         if button_id == "first-run-hermes-next":
             self._advance_first_run_hermes_step()
             return
@@ -266,6 +289,7 @@ class HermesControlPanelApp(App[None]):
         if worker.name not in (
             "first-run-cloud-sync",
             "first-run-cloud-check",
+            "first-run-hermes-live-metadata",
         ) or event.state not in (
             WorkerState.SUCCESS,
             WorkerState.ERROR,
@@ -327,7 +351,31 @@ class HermesControlPanelApp(App[None]):
                     self._render_cloud_sync_failure()
             self._refresh_first_run_sidebar()
             return
+        if event.state == WorkerState.SUCCESS and worker.name == "first-run-hermes-live-metadata":
+            request_id, result = cast(tuple[int, HermesDefaults | str], worker.result)
+            if request_id != self._hermes_live_metadata_request_id:
+                return
+            self._finish_hermes_live_metadata_progress()
+            if isinstance(result, str):
+                self._hermes_live_metadata_synced = False
+                self._set_first_run_hermes_step_status(result, color="red")
+                self._refresh_first_run_hermes_next_state()
+            else:
+                self._apply_hermes_live_metadata_defaults(result)
+                self._set_first_run_hermes_step_status("Hermes live metadata synced.")
+            self._refresh_first_run_sidebar()
+            return
         if event.state in (WorkerState.ERROR, WorkerState.CANCELLED):
+            if worker.name == "first-run-hermes-live-metadata":
+                self._finish_hermes_live_metadata_progress()
+                self._hermes_live_metadata_synced = False
+                message = "Hermes live metadata sync failed. Retry."
+                if worker.error is not None:
+                    message = str(worker.error)
+                self._set_first_run_hermes_step_status(message, color="red")
+                self._refresh_first_run_hermes_next_state()
+                self._refresh_first_run_sidebar()
+                return
             if self._cloud_metadata_sync_loading:
                 self._finish_cloud_sync_progress()
                 self._set_first_run_cloud_step_status(
@@ -336,12 +384,38 @@ class HermesControlPanelApp(App[None]):
 
     def on_select_changed(self, event: Select.Changed) -> None:
         if event.select.id == "first-run-hermes-provider":
-            if isinstance(event.value, str):
-                self._refresh_first_run_hermes_model_options(event.value)
+            if (
+                not self._hermes_live_metadata_synced
+                and not self.config_flow.draft.hermes.provider
+                and event.value == self.config_flow.hermes_defaults().provider
+            ):
+                return
+            if (
+                isinstance(event.value, str)
+                and not self._applying_hermes_live_metadata
+                and event.value != self.config_flow.draft.hermes.provider
+            ):
+                self.config_flow.draft.hermes.provider = event.value
+                self._sync_first_run_hermes_live_metadata(show_version_placeholder=False)
             return
         if event.select.id == "first-run-hermes-version":
             if isinstance(event.value, str):
+                if event.value == "__syncing__":
+                    return
                 self._refresh_first_run_hermes_release_tag(event.value)
+                if (
+                    not self._hermes_live_metadata_synced
+                    and not self.config_flow.draft.hermes.agent_version
+                    and event.value == self.config_flow.hermes_defaults().agent_version
+                ):
+                    return
+                if (
+                    not self._applying_hermes_live_metadata
+                    and event.value != self.config_flow.draft.hermes.agent_version
+                ):
+                    self.config_flow.draft.hermes.agent_version = event.value
+                    self.config_flow.draft.hermes.agent_release_tag = self._hermes_live_version_tags.get(event.value, "")
+                    self._sync_first_run_hermes_live_metadata()
             return
         if event.select.id == "first-run-hermes-auth-method":
             self._refresh_first_run_hermes_auth_section()
@@ -1016,13 +1090,13 @@ class HermesControlPanelApp(App[None]):
             Label("Hermes Agent version"),
             self._first_run_spacer("first-run-hermes-version-spacer"),
             Select(
-                tuple((version, version) for version, _tag in defaults.version_options),
-                value=defaults.agent_version,
+                (("Syncing Hermes...", "__syncing__"),),
+                value="__syncing__",
                 id="first-run-hermes-version",
             ),
             self._first_run_spacer("first-run-hermes-version-after-spacer"),
             Static(
-                f"Release tag: {defaults.agent_release_tag}",
+                "Release tag: syncing...",
                 id="first-run-hermes-release-tag",
             ),
             self._first_run_spacer("first-run-hermes-release-tag-after-spacer"),
@@ -1059,14 +1133,169 @@ class HermesControlPanelApp(App[None]):
                 id="first-run-hermes-api-key",
             ),
             self._first_run_spacer("first-run-hermes-api-key-after-spacer"),
-            Button("Next: Gateways", id="first-run-hermes-next", variant="primary"),
+            Button("Retry", id="first-run-hermes-retry"),
+            self._first_run_spacer("first-run-hermes-retry-after-spacer"),
+            Button("Next: Gateways", id="first-run-hermes-next", variant="primary", disabled=True),
+            self._first_run_spacer("first-run-hermes-next-after-spacer"),
             Static("", id="first-run-hermes-step-status"),
         )
         self._refresh_first_run_hermes_auth_section()
+        self._sync_first_run_hermes_live_metadata()
+
+    def _sync_first_run_hermes_live_metadata(
+        self, *, force_refresh: bool = False, show_version_placeholder: bool = True
+    ) -> None:
+        self._hermes_live_metadata_request_id += 1
+        request_id = self._hermes_live_metadata_request_id
+        request_token = f"hermes-{request_id}"
+        self._start_hermes_live_metadata_progress(
+            show_version_placeholder=show_version_placeholder
+        )
+
+        def run_sync() -> tuple[int, HermesDefaults | str]:
+            try:
+                defaults = self.config_flow.sync_hermes_live_metadata(
+                    release_service=self.hermes_release_service,
+                    cache_service=self.hermes_toolchain_cache,
+                    runtime_metadata_service=self.hermes_runtime_metadata_service,
+                    request_id=request_token,
+                    force_refresh=force_refresh,
+                )
+            except Exception as exc:
+                return request_id, str(exc)
+            return request_id, defaults
+
+        self.run_worker(
+            run_sync,
+            name="first-run-hermes-live-metadata",
+            group="first-run-hermes-live-metadata",
+            thread=True,
+            exclusive=True,
+        )
+
+    def _start_hermes_live_metadata_progress(
+        self, *, show_version_placeholder: bool = True
+    ) -> None:
+        self._hermes_live_metadata_loading = True
+        self._hermes_live_metadata_synced = False
+        if show_version_placeholder:
+            self._show_hermes_version_syncing_placeholder()
+        self._set_hermes_controls_disabled(True)
+        self._start_hermes_status_animation("Syncing Hermes...")
+        self._refresh_first_run_hermes_next_state()
+
+    def _show_hermes_version_syncing_placeholder(self) -> None:
+        self._applying_hermes_live_metadata = True
+        try:
+            version_select = self.query_one("#first-run-hermes-version", Select)
+            version_select.set_options((("Syncing Hermes...", "__syncing__"),))
+            version_select.value = "__syncing__"
+            self.query_one("#first-run-hermes-release-tag", Static).update("Release tag: syncing...")
+        except Exception:
+            return
+        finally:
+            self._applying_hermes_live_metadata = False
+
+    def _finish_hermes_live_metadata_progress(self) -> None:
+        self._hermes_live_metadata_loading = False
+        self._stop_hermes_status_animation()
+        self._set_hermes_controls_disabled(False)
+        self._refresh_first_run_hermes_next_state()
+
+    def _start_hermes_status_animation(self, message: str) -> None:
+        self._hermes_status_loading_message = message
+        self._hermes_status_animation_index = 1
+        self._tick_hermes_status_animation()
+        if self._hermes_status_timer is None:
+            self._hermes_status_timer = self.set_interval(
+                0.12, self._tick_hermes_status_animation
+            )
+            return
+        self._hermes_status_timer.resume()
+
+    def _stop_hermes_status_animation(self) -> None:
+        if self._hermes_status_timer is not None:
+            self._hermes_status_timer.pause()
+
+    def _hermes_loading_wave(self) -> str:
+        frames = self.CLOUD_LOADING_FRAMES
+        start = self._hermes_status_animation_index % len(frames)
+        return "".join(frames[(start + offset) % len(frames)] for offset in range(3))
+
+    def _tick_hermes_status_animation(self) -> None:
+        if (
+            not self._hermes_live_metadata_loading
+            or not self._hermes_status_loading_message
+        ):
+            return
+        wave = self._hermes_loading_wave()
+        self._hermes_status_animation_index += 1
+        self._set_first_run_hermes_step_status(
+            f"{wave} {self._hermes_status_loading_message}", color="rgb(1,120,212)"
+        )
+
+    def _set_hermes_controls_disabled(self, disabled: bool) -> None:
+        for selector in (
+            "#first-run-hermes-version",
+            "#first-run-hermes-provider",
+            "#first-run-hermes-model",
+            "#first-run-hermes-auth-method",
+            "#first-run-hermes-oauth-button",
+            "#first-run-hermes-api-key",
+        ):
+            try:
+                widget = self.query_one(selector)
+                widget.disabled = disabled  # type: ignore[attr-defined]
+            except Exception:
+                continue
+        try:
+            self.query_one("#first-run-hermes-retry", Button).disabled = disabled
+        except Exception:
+            pass
+
+    def _refresh_first_run_hermes_next_state(self) -> None:
+        try:
+            self.query_one("#first-run-hermes-next", Button).disabled = (
+                self._hermes_live_metadata_loading or not self._hermes_live_metadata_synced
+            )
+        except Exception:
+            return
+
+    def _apply_hermes_live_metadata_defaults(self, defaults: HermesDefaults) -> None:
+        self._applying_hermes_live_metadata = True
+        try:
+            version_select = self.query_one("#first-run-hermes-version", Select)
+            provider_select = self.query_one("#first-run-hermes-provider", Select)
+            model_select = self.query_one("#first-run-hermes-model", Select)
+            auth_select = self.query_one("#first-run-hermes-auth-method", Select)
+            self._hermes_live_version_tags = dict(defaults.version_options)
+            self.config_flow.draft.hermes.agent_version = defaults.agent_version
+            self.config_flow.draft.hermes.agent_release_tag = defaults.agent_release_tag
+            self.config_flow.draft.hermes.provider = defaults.provider
+            self.config_flow.draft.hermes.model = defaults.model
+            self.config_flow.hermes_auth_mode = defaults.auth_method
+            version_select.set_options(tuple((version, version) for version, _tag in defaults.version_options))
+            version_select.value = defaults.agent_version
+            provider_select.set_options(tuple((provider, provider) for provider in defaults.provider_options))
+            provider_select.value = defaults.provider
+            model_select.set_options(tuple((model, model) for model in defaults.model_options))
+            model_select.value = defaults.model if defaults.model else Select.BLANK
+            auth_select.set_options(
+                tuple(("OAuth" if method == "oauth" else "API key", method) for method in defaults.auth_methods)
+            )
+            auth_select.value = defaults.auth_method
+            self.query_one("#first-run-hermes-release-tag", Static).update(
+                f"Release tag: {defaults.agent_release_tag}"
+            )
+            self._hermes_live_metadata_synced = True
+        finally:
+            self._applying_hermes_live_metadata = False
+        self._refresh_first_run_hermes_auth_section()
+        self._refresh_first_run_hermes_next_state()
 
     def _refresh_first_run_hermes_release_tag(self, version: str) -> None:
         defaults = self.config_flow.hermes_defaults()
-        tag = dict(defaults.version_options).get(version, "unknown")
+        tag = self._hermes_live_version_tags.get(version) or dict(defaults.version_options).get(version, "unknown")
         try:
             self.query_one("#first-run-hermes-release-tag", Static).update(
                 f"Release tag: {tag}"
@@ -1081,7 +1310,7 @@ class HermesControlPanelApp(App[None]):
             model_select.set_options(
                 tuple((model, model) for model in defaults.model_options)
             )
-            model_select.value = defaults.model
+            model_select.value = defaults.model if defaults.model else Select.BLANK
         except Exception:
             return
         self._refresh_first_run_hermes_auth_section()
@@ -1123,6 +1352,12 @@ class HermesControlPanelApp(App[None]):
             return
 
     def _advance_first_run_hermes_step(self) -> None:
+        if not self._hermes_live_metadata_synced:
+            self._set_first_run_hermes_step_status(
+                "Sync Hermes live metadata successfully before continuing.", color="red"
+            )
+            self._refresh_first_run_sidebar()
+            return
         version = self.query_one("#first-run-hermes-version", Select).value
         provider = self.query_one("#first-run-hermes-provider", Select).value
         model = self.query_one("#first-run-hermes-model", Select).value

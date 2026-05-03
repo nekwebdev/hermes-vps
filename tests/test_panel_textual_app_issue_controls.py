@@ -18,7 +18,7 @@ from textual.widgets import (
 )
 
 from hermes_vps_app.cloud_remediation import ProviderId, remediation_for
-from hermes_vps_app.panel_config_flow import CloudMetadataSyncResult
+from hermes_vps_app.panel_config_flow import CloudMetadataSyncResult, HermesDefaults
 from hermes_vps_app.panel_shell import ControlPanelShell
 from hermes_vps_app.panel_startup import (
     PanelStartupResult,
@@ -671,10 +671,10 @@ class PanelTextualControlsTests(unittest.IsolatedAsyncioTestCase):
                 status_widget = app.query_one("#first-run-cloud-step-status", Static)
                 progress_text = str(status_widget.renderable)
                 self.assertIn("Syncing", progress_text)
-                wave = progress_text.removesuffix("Syncing live cloud metadata...")
+                wave = progress_text.removesuffix("Syncing live cloud metadata...").rstrip()
                 self.assertEqual(len(wave), 3)
                 self.assertFalse(wave.endswith("⠀"))
-                self.assertTrue(progress_text.startswith(wave + "Syncing"))
+                self.assertTrue(progress_text.startswith(wave + " Syncing"))
                 self.assertTrue(any(frame in progress_text for frame in "⢀⣠⣴⣾⣿⣷⣦⣄"))
                 title_color = str(
                     getattr(
@@ -1371,6 +1371,322 @@ class PanelTextualControlsTests(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assertEqual(str(app.query_one("#first-run-hermes-next", Button).label), "Next: Gateways")
 
+
+    async def test_hermes_step_auto_syncs_live_metadata_and_updates_controls(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            app = self._first_run_app_at_tmp(root)
+            app.config_flow.cloud_metadata_sync_runner = self._successful_cloud_sync
+            calls: list[tuple[str, bool]] = []
+
+            def fake_sync(*, release_service: object, cache_service: object, runtime_metadata_service: object, request_id: str, force_refresh: bool = False) -> HermesDefaults:
+                calls.append((request_id, force_refresh))
+                return HermesDefaults(
+                    version_options=(("0.12.0", "v2026.4.30"), ("0.11.0", "v2026.4.23")),
+                    agent_version="0.12.0",
+                    agent_release_tag="v2026.4.30",
+                    provider_options=("openai-codex", "anthropic"),
+                    provider="openai-codex",
+                    model_options=("gpt-5.4-mini", "gpt-5.4"),
+                    model="gpt-5.4-mini",
+                    auth_methods=("oauth", "api_key"),
+                    auth_method="oauth",
+                )
+
+            app.config_flow.sync_hermes_live_metadata = fake_sync  # type: ignore[method-assign]
+
+            async with app.run_test() as pilot:
+                await self._advance_to_hermes(app, pilot)
+                await pilot.pause()
+
+                self.assertEqual(calls, [("hermes-1", False)])
+                self.assertEqual(app.query_one("#first-run-hermes-version", Select).value, "0.12.0")
+                self.assertEqual(
+                    str(app.query_one("#first-run-hermes-release-tag", Static).renderable),
+                    "Release tag: v2026.4.30",
+                )
+                self.assertEqual(app.query_one("#first-run-hermes-model", Select).value, "gpt-5.4-mini")
+                self.assertFalse(app.query_one("#first-run-hermes-next", Button).disabled)
+                self.assertIn(
+                    "Hermes live metadata synced.",
+                    str(app.query_one("#first-run-hermes-step-status", Static).renderable),
+                )
+
+    async def test_hermes_provider_change_keeps_version_select_stable_while_syncing(self) -> None:
+        from tempfile import TemporaryDirectory
+        from threading import Event
+
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            app = self._first_run_app_at_tmp(root)
+            app.config_flow.cloud_metadata_sync_runner = self._successful_cloud_sync
+            second_started = Event()
+            release_second = Event()
+
+            def fake_sync(*, release_service: object, cache_service: object, runtime_metadata_service: object, request_id: str, force_refresh: bool = False) -> HermesDefaults:
+                if request_id == "hermes-2":
+                    second_started.set()
+                    _ = release_second.wait(timeout=2)
+                    return HermesDefaults(
+                        version_options=(("0.10.0", "v2026.4.16"), ("0.9.0", "v2026.4.9")),
+                        agent_version="0.10.0",
+                        agent_release_tag="v2026.4.16",
+                        provider_options=("openai-codex", "anthropic"),
+                        provider="anthropic",
+                        model_options=("anthropic/claude-opus-4", "anthropic/claude-sonnet-4"),
+                        model="anthropic/claude-opus-4",
+                        auth_methods=("oauth", "api_key"),
+                        auth_method="oauth",
+                    )
+                return self._sample_hermes_defaults()
+
+            app.config_flow.sync_hermes_live_metadata = fake_sync  # type: ignore[method-assign]
+
+            async with app.run_test() as pilot:
+                await self._advance_to_hermes(app, pilot)
+                await pilot.pause()
+                version_select = app.query_one("#first-run-hermes-version", Select)
+                self.assertEqual(version_select.value, "0.10.0")
+
+                app.query_one("#first-run-hermes-provider", Select).value = "anthropic"
+                await pilot.pause(0.05)
+                self.assertTrue(second_started.wait(timeout=2))
+                await pilot.pause()
+
+                self.assertEqual(version_select.value, "0.10.0")
+                self.assertIn("0.10.0", str(version_select._options))
+                self.assertNotIn("Syncing Hermes", str(version_select._options))
+                self.assertIn(
+                    "Syncing Hermes...",
+                    str(app.query_one("#first-run-hermes-step-status", Static).renderable),
+                )
+
+                release_second.set()
+                await pilot.pause()
+                self.assertEqual(version_select.value, "0.10.0")
+                self.assertEqual(
+                    app.query_one("#first-run-hermes-provider", Select).value,
+                    "anthropic",
+                )
+
+    async def test_hermes_step_updates_auth_methods_from_provider_live_metadata(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            app = self._first_run_app_at_tmp(root)
+            app.config_flow.cloud_metadata_sync_runner = self._successful_cloud_sync
+
+            def fake_sync(*, release_service: object, cache_service: object, runtime_metadata_service: object, request_id: str, force_refresh: bool = False) -> HermesDefaults:
+                return HermesDefaults(
+                    version_options=(("0.12.0", "v2026.4.30"),),
+                    agent_version="0.12.0",
+                    agent_release_tag="v2026.4.30",
+                    provider_options=("xiaomi",),
+                    provider="xiaomi",
+                    model_options=("mimo-v2-pro", "mimo-v2-flash"),
+                    model="mimo-v2-pro",
+                    auth_methods=("api_key",),
+                    auth_method="api_key",
+                )
+
+            app.config_flow.sync_hermes_live_metadata = fake_sync  # type: ignore[method-assign]
+
+            async with app.run_test() as pilot:
+                await self._advance_to_hermes(app, pilot)
+                await pilot.pause()
+
+                self.assertEqual(app.query_one("#first-run-hermes-provider", Select).value, "xiaomi")
+                self.assertEqual(app.query_one("#first-run-hermes-auth-method", Select).value, "api_key")
+                self.assertEqual(app.query_one("#first-run-hermes-api-key", Input).styles.display, "block")
+                self.assertEqual(app.query_one("#first-run-hermes-oauth-button", Button).styles.display, "none")
+
+    async def test_hermes_step_shows_wave_status_and_blank_line_below_gateways_button(self) -> None:
+        from tempfile import TemporaryDirectory
+        from threading import Event
+
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            app = self._first_run_app_at_tmp(root)
+            app.config_flow.cloud_metadata_sync_runner = self._successful_cloud_sync
+            started = Event()
+            release = Event()
+
+            def fake_sync(*, release_service: object, cache_service: object, runtime_metadata_service: object, request_id: str, force_refresh: bool = False) -> HermesDefaults:
+                started.set()
+                _ = release.wait(timeout=2)
+                return self._sample_hermes_defaults()
+
+            app.config_flow.sync_hermes_live_metadata = fake_sync  # type: ignore[method-assign]
+
+            async with app.run_test() as pilot:
+                await self._advance_to_hermes(app, pilot)
+                self.assertTrue(started.wait(timeout=2))
+                await pilot.pause()
+
+                status = app.query_one("#first-run-hermes-step-status", Static)
+                version_select = app.query_one("#first-run-hermes-version", Select)
+                self.assertIn("Syncing Hermes...", str(status.renderable))
+                self.assertRegex(str(status.renderable), r"^[⣠⣴⣾⣿⣷⣦⣄]{3} Syncing Hermes\.\.\.")
+                self.assertEqual(version_select.value, "__syncing__")
+                self.assertIn("Syncing", str(version_select._options))
+                self.assertNotIn("0.10.0", str(version_select._options))
+                self.assertTrue(app.query_one("#first-run-hermes-next-after-spacer").display)
+
+                release.set()
+                await pilot.pause()
+                self.assertIn(
+                    "Hermes live metadata synced.",
+                    str(app.query_one("#first-run-hermes-step-status", Static).renderable),
+                )
+
+    async def test_hermes_live_metadata_failure_blocks_gateways_and_retry_recovers(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            app = self._first_run_app_at_tmp(root)
+            app.config_flow.cloud_metadata_sync_runner = self._successful_cloud_sync
+            attempts = 0
+
+            def fake_sync(*, release_service: object, cache_service: object, runtime_metadata_service: object, request_id: str, force_refresh: bool = False) -> HermesDefaults:
+                nonlocal attempts
+                attempts += 1
+                if attempts == 1:
+                    raise RuntimeError("Could not load Hermes Agent releases from GitHub. Check network/GitHub access, then retry.")
+                return self._sample_hermes_defaults()
+
+            app.config_flow.sync_hermes_live_metadata = fake_sync  # type: ignore[method-assign]
+
+            async with app.run_test() as pilot:
+                await self._advance_to_hermes(app, pilot)
+                await pilot.pause()
+
+                self.assertTrue(app.query_one("#first-run-hermes-next", Button).disabled)
+                self.assertEqual(str(app.query_one("#first-run-hermes-retry", Button).label), "Retry")
+                self.assertIn(
+                    "Could not load Hermes Agent releases from GitHub",
+                    str(app.query_one("#first-run-hermes-step-status", Static).renderable),
+                )
+
+                _ = app.query_one("#first-run-hermes-retry", Button).press()
+                await pilot.pause()
+
+                self.assertEqual(attempts, 2)
+                self.assertFalse(app.query_one("#first-run-hermes-next", Button).disabled)
+                self.assertIn(
+                    "Hermes live metadata synced.",
+                    str(app.query_one("#first-run-hermes-step-status", Static).renderable),
+                )
+
+
+
+    async def test_hermes_live_metadata_newer_request_supersedes_in_flight_request(self) -> None:
+        from tempfile import TemporaryDirectory
+        from threading import Event
+
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            app = self._first_run_app_at_tmp(root)
+            app.config_flow.cloud_metadata_sync_runner = self._successful_cloud_sync
+            first_started = Event()
+            release_first = Event()
+            calls: list[str] = []
+
+            def fake_sync(*, release_service: object, cache_service: object, runtime_metadata_service: object, request_id: str, force_refresh: bool = False) -> HermesDefaults:
+                calls.append(request_id)
+                if request_id == "hermes-1":
+                    first_started.set()
+                    _ = release_first.wait(timeout=2)
+                    return HermesDefaults(
+                        version_options=(("0.12.0", "v2026.4.30"),),
+                        agent_version="0.12.0",
+                        agent_release_tag="v2026.4.30",
+                        provider_options=("openai-codex",),
+                        provider="openai-codex",
+                        model_options=("stale-model",),
+                        model="stale-model",
+                        auth_methods=("oauth",),
+                        auth_method="oauth",
+                    )
+                return HermesDefaults(
+                    version_options=(("0.11.0", "v2026.4.23"),),
+                    agent_version="0.11.0",
+                    agent_release_tag="v2026.4.23",
+                    provider_options=("openai-codex",),
+                    provider="openai-codex",
+                    model_options=("fresh-model",),
+                    model="fresh-model",
+                    auth_methods=("oauth",),
+                    auth_method="oauth",
+                )
+
+            app.config_flow.sync_hermes_live_metadata = fake_sync  # type: ignore[method-assign]
+
+            async with app.run_test() as pilot:
+                await self._advance_to_hermes(app, pilot)
+                self.assertTrue(first_started.wait(timeout=2))
+                app._sync_first_run_hermes_live_metadata(force_refresh=True)
+                release_first.set()
+                await pilot.pause()
+
+                self.assertEqual(calls[:2], ["hermes-1", "hermes-2"])
+                self.assertEqual(app.query_one("#first-run-hermes-version", Select).value, "0.11.0")
+                self.assertEqual(app.query_one("#first-run-hermes-model", Select).value, "fresh-model")
+
+    async def test_hermes_live_metadata_ignores_stale_result_after_newer_request(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            app = self._first_run_app_at_tmp(root)
+            app.config_flow.cloud_metadata_sync_runner = self._successful_cloud_sync
+            calls: list[str] = []
+
+            def fake_sync(*, release_service: object, cache_service: object, runtime_metadata_service: object, request_id: str, force_refresh: bool = False) -> HermesDefaults:
+                calls.append(request_id)
+                if request_id == "hermes-1":
+                    return HermesDefaults(
+                        version_options=(("0.12.0", "v2026.4.30"),),
+                        agent_version="0.12.0",
+                        agent_release_tag="v2026.4.30",
+                        provider_options=("openai-codex",),
+                        provider="openai-codex",
+                        model_options=("stale-model",),
+                        model="stale-model",
+                        auth_methods=("oauth",),
+                        auth_method="oauth",
+                    )
+                return HermesDefaults(
+                    version_options=(("0.11.0", "v2026.4.23"),),
+                    agent_version="0.11.0",
+                    agent_release_tag="v2026.4.23",
+                    provider_options=("openai-codex",),
+                    provider="openai-codex",
+                    model_options=("fresh-model",),
+                    model="fresh-model",
+                    auth_methods=("oauth",),
+                    auth_method="oauth",
+                )
+
+            app.config_flow.sync_hermes_live_metadata = fake_sync  # type: ignore[method-assign]
+
+            async with app.run_test() as pilot:
+                await self._advance_to_hermes(app, pilot)
+                app._hermes_live_metadata_request_id += 1
+                app._sync_first_run_hermes_live_metadata(force_refresh=True)
+                await pilot.pause()
+
+                self.assertEqual(calls, ["hermes-1", "hermes-3"])
+                self.assertEqual(app.query_one("#first-run-hermes-version", Select).value, "0.11.0")
+                self.assertEqual(app.query_one("#first-run-hermes-model", Select).value, "fresh-model")
+                self.assertEqual(
+                    str(app.query_one("#first-run-hermes-release-tag", Static).renderable),
+                    "Release tag: v2026.4.23",
+                )
+
     async def test_hermes_oauth_placeholder_advances_to_gateways_without_writes(self) -> None:
         from tempfile import TemporaryDirectory
 
@@ -1446,14 +1762,47 @@ class PanelTextualControlsTests(unittest.IsolatedAsyncioTestCase):
         )
 
     @staticmethod
+    def _sample_hermes_defaults() -> HermesDefaults:
+        return HermesDefaults(
+            version_options=(("0.10.0", "v2026.4.16"), ("0.9.0", "v2026.4.9")),
+            agent_version="0.10.0",
+            agent_release_tag="v2026.4.16",
+            provider_options=("openai-codex", "anthropic"),
+            provider="openai-codex",
+            model_options=("gpt-5.4-mini", "gpt-5.4"),
+            model="gpt-5.4-mini",
+            auth_methods=("oauth", "api_key"),
+            auth_method="oauth",
+        )
+
+    @staticmethod
     def _first_run_app_at_tmp(root: Path) -> HermesControlPanelApp:
         startup = _configuration_required_startup()
-        return HermesControlPanelApp(
+        app = HermesControlPanelApp(
             shell=ControlPanelShell(startup_result=startup, initial_panel="configuration"),
             repo_root=root,
             startup_result=startup,
             initial_panel="configuration",
         )
+
+        def fake_sync(*, release_service: object, cache_service: object, runtime_metadata_service: object, request_id: str, force_refresh: bool = False) -> HermesDefaults:
+            _ = (release_service, cache_service, runtime_metadata_service, request_id, force_refresh)
+            if app.config_flow.draft.hermes.provider == "anthropic":
+                return HermesDefaults(
+                    version_options=(("0.10.0", "v2026.4.16"), ("0.9.0", "v2026.4.9")),
+                    agent_version="0.10.0",
+                    agent_release_tag="v2026.4.16",
+                    provider_options=("openai-codex", "anthropic"),
+                    provider="anthropic",
+                    model_options=("anthropic/claude-opus-4", "anthropic/claude-sonnet-4"),
+                    model="anthropic/claude-opus-4",
+                    auth_methods=("oauth", "api_key"),
+                    auth_method="oauth",
+                )
+            return PanelTextualControlsTests._sample_hermes_defaults()
+
+        app.config_flow.sync_hermes_live_metadata = fake_sync  # type: ignore[method-assign]
+        return app
 
     async def _advance_to_hermes(self, app: HermesControlPanelApp, pilot: object) -> None:
         pause = getattr(pilot, "pause")
