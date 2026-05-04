@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import cast
 
 from rich.text import Text
+from textual.containers import VerticalScroll
 from textual.widgets import (
     Button,
     Checkbox,
@@ -18,6 +19,14 @@ from textual.widgets import (
 )
 
 from hermes_vps_app.cloud_remediation import ProviderId, remediation_for
+from hermes_vps_app.hermes_oauth import (
+    HermesOAuthCancelToken,
+    HermesOAuthCompletedEvent,
+    HermesOAuthInstruction,
+    HermesOAuthInstructionEvent,
+    HermesOAuthOutputEvent,
+    HermesOAuthRunResult,
+)
 from hermes_vps_app.panel_config_flow import CloudMetadataSyncResult, HermesDefaults
 from hermes_vps_app.panel_shell import ControlPanelShell
 from hermes_vps_app.panel_startup import (
@@ -94,6 +103,7 @@ class PanelTextualControlsTests(unittest.IsolatedAsyncioTestCase):
                     "monitoring-run-health",
                 ):
                     self.assertTrue(app.query_one(f"#{button_id}").can_focus)
+                self.assertTrue(any(isinstance(widget, VerticalScroll) for widget in app.query(".panel-body")))
 
                 tabs.active = "configuration"
                 await pilot.pause()
@@ -133,6 +143,7 @@ class PanelTextualControlsTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(
                     app.query_one("#first-run-cloud-provider", Select).can_focus
                 )
+                self.assertIsInstance(app.query_one("#first-run-step-main"), VerticalScroll)
                 self.assertTrue(
                     app.query_one("#first-run-cloud-token", Input).can_focus
                 )
@@ -1408,7 +1419,9 @@ class PanelTextualControlsTests(unittest.IsolatedAsyncioTestCase):
                     "Release tag: v2026.4.30",
                 )
                 self.assertEqual(app.query_one("#first-run-hermes-model", Select).value, "gpt-5.4-mini")
-                self.assertFalse(app.query_one("#first-run-hermes-next", Button).disabled)
+                self.assertTrue(app.query_one("#first-run-hermes-next", Button).disabled)
+                self.assertFalse(app.query_one("#first-run-hermes-oauth-button", Button).disabled)
+                self.assertEqual(app.query_one("#first-run-hermes-retry", Button).styles.display, "none")
                 self.assertIn(
                     "Hermes live metadata synced.",
                     str(app.query_one("#first-run-hermes-step-status", Static).renderable),
@@ -1565,7 +1578,9 @@ class PanelTextualControlsTests(unittest.IsolatedAsyncioTestCase):
                 await pilot.pause()
 
                 self.assertTrue(app.query_one("#first-run-hermes-next", Button).disabled)
-                self.assertEqual(str(app.query_one("#first-run-hermes-retry", Button).label), "Retry")
+                retry = app.query_one("#first-run-hermes-retry", Button)
+                self.assertEqual(str(retry.label), "Retry Hermes metadata")
+                self.assertEqual(retry.styles.display, "block")
                 self.assertIn(
                     "Could not load Hermes Agent releases from GitHub",
                     str(app.query_one("#first-run-hermes-step-status", Static).renderable),
@@ -1575,7 +1590,9 @@ class PanelTextualControlsTests(unittest.IsolatedAsyncioTestCase):
                 await pilot.pause()
 
                 self.assertEqual(attempts, 2)
-                self.assertFalse(app.query_one("#first-run-hermes-next", Button).disabled)
+                self.assertTrue(app.query_one("#first-run-hermes-next", Button).disabled)
+                self.assertFalse(app.query_one("#first-run-hermes-oauth-button", Button).disabled)
+                self.assertEqual(app.query_one("#first-run-hermes-retry", Button).styles.display, "none")
                 self.assertIn(
                     "Hermes live metadata synced.",
                     str(app.query_one("#first-run-hermes-step-status", Static).renderable),
@@ -1687,7 +1704,7 @@ class PanelTextualControlsTests(unittest.IsolatedAsyncioTestCase):
                     "Release tag: v2026.4.23",
                 )
 
-    async def test_hermes_oauth_placeholder_advances_to_gateways_without_writes(self) -> None:
+    async def test_hermes_oauth_runs_real_service_captures_artifact_then_advances_without_writes(self) -> None:
         from tempfile import TemporaryDirectory
 
         with TemporaryDirectory() as tmp:
@@ -1695,17 +1712,81 @@ class PanelTextualControlsTests(unittest.IsolatedAsyncioTestCase):
             app = self._first_run_app_at_tmp(root)
             app.config_flow.cloud_metadata_sync_runner = self._successful_cloud_sync
 
+            class FakeOAuthRunner:
+                def run(
+                    self,
+                    *,
+                    cache_dir: Path,
+                    provider: str,
+                    agent_version: str,
+                    agent_release_tag: str,
+                    request_id: str,
+                    cancel_token: HermesOAuthCancelToken | None = None,
+                    on_event: object | None = None,
+                ) -> HermesOAuthRunResult:
+                    del cancel_token
+                    assert cache_dir == root / ".cache" / "hermes-toolchain" / f"{agent_version}-{agent_release_tag}"
+                    if callable(on_event):
+                        on_event(HermesOAuthOutputEvent("stdout", "Visit https://example.test/device\n"))
+                        on_event(
+                            HermesOAuthInstructionEvent(
+                                instruction=HermesOAuthInstruction("url", "https://example.test/device"),
+                                text="Visit https://example.test/device",
+                                stream="stdout",
+                            )
+                        )
+                        on_event(HermesOAuthOutputEvent("stdout", "Enter code ABCD-EFGH\n"))
+                        on_event(
+                            HermesOAuthInstructionEvent(
+                                instruction=HermesOAuthInstruction("code", "ABCD-EFGH"),
+                                text="Enter code ABCD-EFGH",
+                                stream="stdout",
+                            )
+                        )
+                    result = HermesOAuthRunResult(
+                        status="succeeded",
+                        provider=provider,
+                        agent_version=agent_version,
+                        agent_release_tag=agent_release_tag,
+                        auth_method="oauth",
+                        auth_json_bytes=b'{"token":"secret"}',
+                        auth_json_sha256="sha",
+                        instructions=(
+                            HermesOAuthInstruction("url", "https://example.test/device"),
+                            HermesOAuthInstruction("code", "ABCD-EFGH"),
+                        ),
+                        output_tail="Visit https://example.test/device\nEnter code ABCD-EFGH\n",
+                        exit_code=0,
+                        error_message=None,
+                    )
+                    if callable(on_event):
+                        on_event(HermesOAuthCompletedEvent(result))
+                    return result
+
+            app.hermes_oauth_runner = FakeOAuthRunner()  # type: ignore[assignment]
+
             async with app.run_test() as pilot:
                 await self._advance_to_hermes(app, pilot)
                 app.query_one("#first-run-hermes-provider", Select).value = "anthropic"
                 await pilot.pause()
                 app.query_one("#first-run-hermes-model", Select).value = "anthropic/claude-opus-4"
+
+                self.assertTrue(app.query_one("#first-run-hermes-next", Button).disabled)
+
                 _ = app.query_one("#first-run-hermes-oauth-button", Button).press()
                 await pilot.pause()
-                self.assertIn(
-                    "OAuth flow will run in a later/apply-capable slice.",
-                    str(app.query_one("#first-run-hermes-oauth-output", Static).renderable),
+
+                oauth_output = str(app.query_one("#first-run-hermes-oauth-output", Static).renderable)
+                self.assertIn("Hold Shift+Ctrl and click to open a link in the browser.", oauth_output)
+                self.assertIn("Hold Shift to select text with the mouse.", oauth_output)
+                self.assertLess(
+                    oauth_output.index("Hold Shift to select text with the mouse."),
+                    oauth_output.index("https://example.test/device"),
                 )
+                self.assertIn("https://example.test/device", oauth_output)
+                self.assertIn("ABCD-EFGH", oauth_output)
+                self.assertIn("OAuth artifact captured. It will be written at Review/Apply.", oauth_output)
+                self.assertNotIn("secret", oauth_output)
 
                 _ = app.query_one("#first-run-hermes-next", Button).press()
                 await pilot.pause()
@@ -1720,6 +1801,7 @@ class PanelTextualControlsTests(unittest.IsolatedAsyncioTestCase):
                     str(app.query_one("#first-run-step-title", Static).renderable),
                 )
                 self.assertFalse((root / ".env").exists())
+                self.assertFalse((root / ".hermes-home" / "auth.json").exists())
 
     async def test_hermes_api_key_mode_blocks_until_key_then_advances_without_writes(self) -> None:
         from tempfile import TemporaryDirectory

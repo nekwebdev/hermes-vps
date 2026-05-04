@@ -21,12 +21,20 @@ from hermes_vps_app.hermes_live_metadata import (
     HermesRuntimeMetadataService,
     HermesToolchainCache,
 )
+from hermes_vps_app.hermes_oauth import (
+    HermesOAuthCancelToken,
+    HermesOAuthEvent,
+    HermesOAuthInstructionEvent,
+    HermesOAuthOutputEvent,
+    HermesOAuthRunResult,
+    HermesOAuthRunner,
+)
 from hermes_vps_app.panel_shell import ControlPanelShell, InitialPanel
 from hermes_vps_app.panel_startup import PanelStartupResult
 
 try:
     from textual.app import App, ComposeResult
-    from textual.containers import Container, Horizontal, Vertical
+    from textual.containers import Container, Horizontal, Vertical, VerticalScroll
     from textual.screen import ModalScreen
     from textual.timer import Timer
     from textual.widgets import (
@@ -129,12 +137,15 @@ class HermesControlPanelApp(App[None]):
     #summary { padding: 1 2; background: $surface; }
     #action-status { padding: 0 2 1 2; background: $surface; border-bottom: solid $accent; }
     #main-tabs { height: 1fr; }
-    .panel-body { padding: 1 2; }
+    TabPane { height: 1fr; }
+    .panel-body { padding: 1 2; height: 1fr; overflow-y: auto; }
+    .panel-scroll { height: 1fr; overflow-y: auto; }
     .panel-title { text-style: bold; color: $accent; margin-bottom: 1; }
     .button-row { height: auto; margin: 0 0 1 0; }
     .button-row Button { margin-right: 1; }
     .line-list { height: auto; margin-top: 1; }
-    #first-run-config-layout { height: auto; }
+    #first-run-config-layout { height: 1fr; }
+    #first-run-config-body { height: 1fr; }
     #first-run-step-sidebar { width: 22; padding: 1; border: solid $accent; margin-right: 1; }
     #first-run-step-main { width: 1fr; }
     .first-run-spacer { height: 1; }
@@ -147,6 +158,7 @@ class HermesControlPanelApp(App[None]):
     #first-run-cloud-server-type-section { display: none; height: auto; margin-bottom: 1; }
     #first-run-cloud-step-status { margin-top: 1; color: white; }
     #first-run-cloud-token-help-dialog { width: 72; height: auto; padding: 1 2; border: solid $accent; background: $surface; }
+    #first-run-hermes-retry { display: none; }
     #first-run-cloud-token-help-text { margin: 1 0; }
     ListItem { padding: 0 1; }
     """
@@ -178,11 +190,15 @@ class HermesControlPanelApp(App[None]):
         self._hermes_live_metadata_synced = False
         self._applying_hermes_live_metadata = False
         self._hermes_live_version_tags: dict[str, str] = {}
+        self._hermes_oauth_running = False
+        self._hermes_oauth_request_id = 0
+        self._hermes_oauth_cancel_token: HermesOAuthCancelToken | None = None
         self.hermes_release_service = HermesReleaseService()
         self.hermes_toolchain_cache = HermesToolchainCache(
             root=self.repo_root / ".cache" / "hermes-toolchain"
         )
         self.hermes_runtime_metadata_service = HermesRuntimeMetadataService()
+        self.hermes_oauth_runner = HermesOAuthRunner(repo_root=self.repo_root)
 
     @override
     def compose(self) -> ComposeResult:
@@ -237,9 +253,10 @@ class HermesControlPanelApp(App[None]):
             self._advance_first_run_host_ssh_step()
             return
         if button_id == "first-run-hermes-oauth-button":
-            self._set_first_run_hermes_oauth_output(
-                "OAuth flow will run in a later/apply-capable slice."
-            )
+            if self._hermes_oauth_running:
+                self._cancel_first_run_hermes_oauth()
+            else:
+                self._start_first_run_hermes_oauth()
             return
         if button_id == "first-run-hermes-retry":
             self._sync_first_run_hermes_live_metadata(force_refresh=True)
@@ -290,6 +307,7 @@ class HermesControlPanelApp(App[None]):
             "first-run-cloud-sync",
             "first-run-cloud-check",
             "first-run-hermes-live-metadata",
+            "first-run-hermes-oauth",
         ) or event.state not in (
             WorkerState.SUCCESS,
             WorkerState.ERROR,
@@ -359,13 +377,35 @@ class HermesControlPanelApp(App[None]):
             if isinstance(result, str):
                 self._hermes_live_metadata_synced = False
                 self._set_first_run_hermes_step_status(result, color="red")
+                self._set_first_run_hermes_retry_visible(True)
                 self._refresh_first_run_hermes_next_state()
             else:
                 self._apply_hermes_live_metadata_defaults(result)
                 self._set_first_run_hermes_step_status("Hermes live metadata synced.")
             self._refresh_first_run_sidebar()
             return
+        if event.state == WorkerState.SUCCESS and worker.name == "first-run-hermes-oauth":
+            request_id, result = cast(tuple[int, HermesOAuthRunResult], worker.result)
+            if request_id != self._hermes_oauth_request_id:
+                return
+            self._finish_first_run_hermes_oauth(result)
+            return
         if event.state in (WorkerState.ERROR, WorkerState.CANCELLED):
+            if worker.name == "first-run-hermes-oauth":
+                request_id = self._hermes_oauth_request_id
+                if worker.result is not None:
+                    request_id, result = cast(tuple[int, HermesOAuthRunResult], worker.result)
+                    if request_id == self._hermes_oauth_request_id:
+                        self._finish_first_run_hermes_oauth(result)
+                        return
+                self._hermes_oauth_running = False
+                self._hermes_oauth_cancel_token = None
+                self.config_flow.clear_hermes_oauth_artifact()
+                self._set_first_run_hermes_oauth_button_label("Start OAuth")
+                self._set_hermes_controls_disabled(False)
+                self._append_first_run_hermes_oauth_output("OAuth cancelled. No artifact captured.")
+                self._refresh_first_run_hermes_next_state()
+                return
             if worker.name == "first-run-hermes-live-metadata":
                 self._finish_hermes_live_metadata_progress()
                 self._hermes_live_metadata_synced = False
@@ -373,6 +413,7 @@ class HermesControlPanelApp(App[None]):
                 if worker.error is not None:
                     message = str(worker.error)
                 self._set_first_run_hermes_step_status(message, color="red")
+                self._set_first_run_hermes_retry_visible(True)
                 self._refresh_first_run_hermes_next_state()
                 self._refresh_first_run_sidebar()
                 return
@@ -396,6 +437,8 @@ class HermesControlPanelApp(App[None]):
                 and event.value != self.config_flow.draft.hermes.provider
             ):
                 self.config_flow.draft.hermes.provider = event.value
+                self.config_flow.clear_hermes_oauth_artifact()
+                self._set_first_run_hermes_oauth_output("Run OAuth again for current Hermes selection.")
                 self._sync_first_run_hermes_live_metadata(show_version_placeholder=False)
             return
         if event.select.id == "first-run-hermes-version":
@@ -415,10 +458,19 @@ class HermesControlPanelApp(App[None]):
                 ):
                     self.config_flow.draft.hermes.agent_version = event.value
                     self.config_flow.draft.hermes.agent_release_tag = self._hermes_live_version_tags.get(event.value, "")
+                    self.config_flow.clear_hermes_oauth_artifact()
+                    self._set_first_run_hermes_oauth_output("Run OAuth again for current Hermes selection.")
                     self._sync_first_run_hermes_live_metadata()
             return
+        if event.select.id == "first-run-hermes-model":
+            self.config_flow.clear_hermes_oauth_artifact()
+            self._set_first_run_hermes_oauth_output("Run OAuth again for current Hermes selection.")
+            self._refresh_first_run_hermes_next_state()
+            return
         if event.select.id == "first-run-hermes-auth-method":
+            self.config_flow.clear_hermes_oauth_artifact()
             self._refresh_first_run_hermes_auth_section()
+            self._refresh_first_run_hermes_next_state()
             return
         if event.select.id == "first-run-cloud-server-type":
             self._refresh_first_run_cloud_next_state()
@@ -520,7 +572,7 @@ class HermesControlPanelApp(App[None]):
     ) -> Container:
         items = [ListItem(Label(line)) for line in lines]
         return Container(
-            Vertical(
+            VerticalScroll(
                 Static(title, classes="panel-title"),
                 Container(*buttons, classes="button-row"),
                 ListView(*items, classes="line-list"),
@@ -536,7 +588,7 @@ class HermesControlPanelApp(App[None]):
                 Static(
                     self._first_run_sidebar_renderable(), id="first-run-step-sidebar"
                 ),
-                Vertical(
+                VerticalScroll(
                     Static(
                         "First-run configuration wizard: Cloud",
                         id="first-run-step-title",
@@ -967,8 +1019,8 @@ class HermesControlPanelApp(App[None]):
         self._refresh_first_run_sidebar()
         self._render_first_run_host_ssh_step()
 
-    def _first_run_step_main(self) -> Vertical:
-        return self.query_one("#first-run-step-main", Vertical)
+    def _first_run_step_main(self) -> VerticalScroll:
+        return self.query_one("#first-run-step-main", VerticalScroll)
 
     @staticmethod
     def _first_run_spacer(widget_id: str) -> Static:
@@ -1133,7 +1185,7 @@ class HermesControlPanelApp(App[None]):
                 id="first-run-hermes-api-key",
             ),
             self._first_run_spacer("first-run-hermes-api-key-after-spacer"),
-            Button("Retry", id="first-run-hermes-retry"),
+            Button("Retry Hermes metadata", id="first-run-hermes-retry"),
             self._first_run_spacer("first-run-hermes-retry-after-spacer"),
             Button("Next: Gateways", id="first-run-hermes-next", variant="primary", disabled=True),
             self._first_run_spacer("first-run-hermes-next-after-spacer"),
@@ -1181,6 +1233,7 @@ class HermesControlPanelApp(App[None]):
         if show_version_placeholder:
             self._show_hermes_version_syncing_placeholder()
         self._set_hermes_controls_disabled(True)
+        self._set_first_run_hermes_retry_visible(False)
         self._start_hermes_status_animation("Syncing Hermes...")
         self._refresh_first_run_hermes_next_state()
 
@@ -1249,15 +1302,33 @@ class HermesControlPanelApp(App[None]):
             except Exception:
                 continue
         try:
-            self.query_one("#first-run-hermes-retry", Button).disabled = disabled
+            retry = self.query_one("#first-run-hermes-retry", Button)
+            retry.disabled = disabled
+            retry.styles.display = "none"
         except Exception:
             pass
 
     def _refresh_first_run_hermes_next_state(self) -> None:
         try:
-            self.query_one("#first-run-hermes-next", Button).disabled = (
-                self._hermes_live_metadata_loading or not self._hermes_live_metadata_synced
-            )
+            next_button = self.query_one("#first-run-hermes-next", Button)
+            disabled = self._hermes_live_metadata_loading or not self._hermes_live_metadata_synced or self._hermes_oauth_running
+            auth_method = self.query_one("#first-run-hermes-auth-method", Select).value
+            if auth_method == "oauth" and not disabled:
+                version = self.query_one("#first-run-hermes-version", Select).value
+                provider = self.query_one("#first-run-hermes-provider", Select).value
+                release_tag = self._hermes_live_version_tags.get(version) if isinstance(version, str) else ""
+                disabled = not (
+                    isinstance(version, str)
+                    and isinstance(provider, str)
+                    and release_tag
+                    and self.config_flow.has_current_hermes_oauth_artifact(
+                        agent_version=version,
+                        agent_release_tag=release_tag,
+                        provider=provider,
+                        auth_method="oauth",
+                    )
+                )
+            next_button.disabled = disabled
         except Exception:
             return
 
@@ -1291,7 +1362,16 @@ class HermesControlPanelApp(App[None]):
         finally:
             self._applying_hermes_live_metadata = False
         self._refresh_first_run_hermes_auth_section()
+        self._set_first_run_hermes_retry_visible(False)
         self._refresh_first_run_hermes_next_state()
+
+    def _set_first_run_hermes_retry_visible(self, visible: bool) -> None:
+        try:
+            retry = self.query_one("#first-run-hermes-retry", Button)
+            retry.styles.display = "block" if visible else "none"
+            retry.disabled = not visible or self._hermes_live_metadata_loading
+        except Exception:
+            return
 
     def _refresh_first_run_hermes_release_tag(self, version: str) -> None:
         defaults = self.config_flow.hermes_defaults()
@@ -1351,6 +1431,133 @@ class HermesControlPanelApp(App[None]):
         except Exception:
             return
 
+    def _append_first_run_hermes_oauth_output(self, message: str) -> None:
+        try:
+            widget = self.query_one("#first-run-hermes-oauth-output", Static)
+            current = str(widget.renderable or "")
+            if current:
+                widget.update(f"{current}\n{message}")
+            else:
+                widget.update(message)
+        except Exception:
+            return
+
+    def _set_first_run_hermes_oauth_button_label(self, label: str) -> None:
+        try:
+            self.query_one("#first-run-hermes-oauth-button", Button).label = label
+        except Exception:
+            return
+
+    def _start_first_run_hermes_oauth(self) -> None:
+        if self._hermes_oauth_running or not self._hermes_live_metadata_synced:
+            return
+        version_value = self.query_one("#first-run-hermes-version", Select).value
+        provider_value = self.query_one("#first-run-hermes-provider", Select).value
+        auth_method_value = self.query_one("#first-run-hermes-auth-method", Select).value
+        if not isinstance(version_value, str) or not isinstance(provider_value, str) or auth_method_value != "oauth":
+            self._set_first_run_hermes_step_status("OAuth requires current Hermes version, provider, and OAuth auth method.", color="red")
+            return
+        agent_release_tag = self._hermes_live_version_tags.get(version_value) or dict(self.config_flow.hermes_defaults().version_options).get(version_value, "")
+        if not agent_release_tag:
+            self._set_first_run_hermes_step_status("Hermes release tag is required before OAuth.", color="red")
+            return
+        self.config_flow.clear_hermes_oauth_artifact()
+        self._hermes_oauth_running = True
+        self._hermes_oauth_request_id += 1
+        request_id = self._hermes_oauth_request_id
+        cancel_token = HermesOAuthCancelToken()
+        self._hermes_oauth_cancel_token = cancel_token
+        self._set_first_run_hermes_oauth_button_label("Cancel OAuth")
+        self._set_first_run_hermes_oauth_output(
+            "Starting OAuth authentication...\n"
+            "Hold Shift+Ctrl and click to open a link in the browser.\n"
+            "Hold Shift to select text with the mouse.\n"
+            "Waiting for Hermes CLI output..."
+        )
+        self._set_hermes_oauth_running_controls(True)
+        self._refresh_first_run_hermes_next_state()
+        cache_dir = self.repo_root / ".cache" / "hermes-toolchain" / f"{version_value}-{agent_release_tag}"
+
+        def on_oauth_event(event: HermesOAuthEvent) -> None:
+            _ = self.call_from_thread(self._handle_first_run_hermes_oauth_event, event)
+
+        def run_oauth() -> tuple[int, HermesOAuthRunResult]:
+            result = self.hermes_oauth_runner.run(
+                cache_dir=cache_dir,
+                provider=provider_value,
+                agent_version=version_value,
+                agent_release_tag=agent_release_tag,
+                request_id=f"hermes-oauth-{request_id}",
+                cancel_token=cancel_token,
+                on_event=on_oauth_event,
+            )
+            return request_id, result
+
+        self.run_worker(
+            run_oauth,
+            name="first-run-hermes-oauth",
+            group="first-run-hermes-oauth",
+            thread=True,
+            exclusive=True,
+        )
+
+    def _cancel_first_run_hermes_oauth(self) -> None:
+        if self._hermes_oauth_cancel_token is not None:
+            self._hermes_oauth_cancel_token.cancel()
+        self._append_first_run_hermes_oauth_output("Cancelling OAuth...")
+
+    def _handle_first_run_hermes_oauth_event(self, event: HermesOAuthEvent) -> None:
+        if isinstance(event, HermesOAuthOutputEvent):
+            self._append_first_run_hermes_oauth_output(event.text.rstrip("\n"))
+            return
+        if isinstance(event, HermesOAuthInstructionEvent):
+            label = "URL" if event.instruction.kind == "url" else "Code"
+            self._append_first_run_hermes_oauth_output(f"{label}: {event.instruction.value}")
+            return
+
+    def _finish_first_run_hermes_oauth(self, result: HermesOAuthRunResult) -> None:
+        self._hermes_oauth_running = False
+        self._hermes_oauth_cancel_token = None
+        self._set_first_run_hermes_oauth_button_label("Start OAuth")
+        self._set_hermes_oauth_running_controls(False)
+        self._render_first_run_hermes_oauth_result(result)
+        self._refresh_first_run_hermes_next_state()
+
+    def _render_first_run_hermes_oauth_result(self, result: HermesOAuthRunResult) -> None:
+        if result.status == "succeeded" and result.auth_json_bytes is not None:
+            self.config_flow.record_hermes_oauth_result(result)
+            self._append_first_run_hermes_oauth_output("OAuth artifact captured. It will be written at Review/Apply.")
+            self._set_first_run_hermes_step_status("OAuth artifact captured.")
+            return
+        self.config_flow.clear_hermes_oauth_artifact()
+        if result.status == "cancelled":
+            self._append_first_run_hermes_oauth_output("OAuth cancelled. No artifact captured.")
+            self._set_first_run_hermes_step_status("OAuth cancelled. No artifact captured.", color="red")
+            return
+        message = result.error_message or "OAuth failed. No artifact captured."
+        self._append_first_run_hermes_oauth_output(message)
+        self._set_first_run_hermes_step_status(message, color="red")
+
+    def _set_hermes_oauth_running_controls(self, running: bool) -> None:
+        for selector in (
+            "#first-run-hermes-version",
+            "#first-run-hermes-provider",
+            "#first-run-hermes-model",
+            "#first-run-hermes-auth-method",
+            "#first-run-hermes-api-key",
+            "#first-run-hermes-retry",
+            "#first-run-hermes-next",
+        ):
+            try:
+                widget = self.query_one(selector)
+                widget.disabled = running  # type: ignore[attr-defined]
+            except Exception:
+                continue
+        try:
+            self.query_one("#first-run-hermes-oauth-button", Button).disabled = False
+        except Exception:
+            pass
+
     def _advance_first_run_hermes_step(self) -> None:
         if not self._hermes_live_metadata_synced:
             self._set_first_run_hermes_step_status(
@@ -1363,6 +1570,22 @@ class HermesControlPanelApp(App[None]):
         model = self.query_one("#first-run-hermes-model", Select).value
         auth_method = self.query_one("#first-run-hermes-auth-method", Select).value
         api_key = self.query_one("#first-run-hermes-api-key", Input).value
+        release_tag = self._hermes_live_version_tags.get(version) if isinstance(version, str) else ""
+        if auth_method == "oauth" and not (
+            isinstance(version, str)
+            and isinstance(provider, str)
+            and release_tag
+            and self.config_flow.has_current_hermes_oauth_artifact(
+                agent_version=version,
+                agent_release_tag=release_tag,
+                provider=provider,
+                auth_method="oauth",
+            )
+        ):
+            self._set_first_run_hermes_step_status("Run OAuth again for current Hermes selection.", color="red")
+            self._refresh_first_run_sidebar()
+            self._refresh_first_run_hermes_next_state()
+            return
         result = self.config_flow.set_hermes(
             agent_version=version if isinstance(version, str) else "",
             provider=provider if isinstance(provider, str) else "",

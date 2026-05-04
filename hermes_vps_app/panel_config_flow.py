@@ -19,6 +19,7 @@ from hermes_vps_app.config_model import (
 from scripts.configure_state import LabeledValue
 from scripts import configure_logic as logic
 from hermes_vps_app.hermes_live_metadata import HermesRelease, HermesRuntimeMetadata, ToolchainCacheResult
+from hermes_vps_app.hermes_oauth import HermesOAuthRunResult
 
 ConfigMode = Literal["first_run", "reconfigure"]
 ConfigStep = Literal["cloud", "server", "hermes", "telegram", "review_apply"]
@@ -146,6 +147,16 @@ class HermesStepResult:
 
 
 @dataclass(frozen=True)
+class HermesOAuthArtifact:
+    provider: str
+    agent_version: str
+    agent_release_tag: str
+    auth_method: Literal["oauth"]
+    auth_json_bytes: bytes
+    auth_json_sha256: str
+
+
+@dataclass(frozen=True)
 class CloudLiveCheckResult:
     provider: ProviderId
     passed: bool
@@ -250,6 +261,7 @@ class PanelConfigFlow:
         self._hermes_version_tags: dict[str, str] = dict(_HERMES_VERSION_TAGS)
         self._hermes_provider_models: dict[str, tuple[str, ...]] = dict(_HERMES_PROVIDER_MODELS)
         self._hermes_auth_methods: tuple[HermesAuthMode, ...] = _HERMES_AUTH_METHODS
+        self._hermes_oauth_artifact: HermesOAuthArtifact | None = None
 
     @classmethod
     def for_repo(cls, repo_root: Path) -> PanelConfigFlow:
@@ -672,6 +684,40 @@ class PanelConfigFlow:
         self.draft.hermes.agent_version = agent_version
         self.draft.hermes.agent_release_tag = agent_release_tag
         self.draft.hermes.api_key = SecretDraft.keep_existing(False)
+
+    def record_hermes_oauth_result(self, result: HermesOAuthRunResult) -> None:
+        if result.status != "succeeded" or result.auth_json_bytes is None or result.auth_json_sha256 is None:
+            self._hermes_oauth_artifact = None
+            return
+        self._hermes_oauth_artifact = HermesOAuthArtifact(
+            provider=result.provider,
+            agent_version=result.agent_version,
+            agent_release_tag=result.agent_release_tag,
+            auth_method="oauth",
+            auth_json_bytes=result.auth_json_bytes,
+            auth_json_sha256=result.auth_json_sha256,
+        )
+
+    def clear_hermes_oauth_artifact(self) -> None:
+        self._hermes_oauth_artifact = None
+
+    def has_current_hermes_oauth_artifact(
+        self,
+        *,
+        agent_version: str,
+        agent_release_tag: str,
+        provider: str,
+        auth_method: str,
+    ) -> bool:
+        artifact = self._hermes_oauth_artifact
+        return bool(
+            artifact is not None
+            and artifact.agent_version == agent_version.strip()
+            and artifact.agent_release_tag == agent_release_tag.strip()
+            and artifact.provider == provider.strip()
+            and artifact.auth_method == auth_method
+            and artifact.auth_json_bytes
+        )
 
     def begin_telegram_validation(self, *, token: str, allowlist_ids: str) -> AsyncValidationRequest:
         self.draft.gateway.telegram_bot_token = SecretDraft.replace(token)
