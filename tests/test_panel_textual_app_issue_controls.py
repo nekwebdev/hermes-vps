@@ -4,9 +4,10 @@ from __future__ import annotations
 import time
 import unittest
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 from rich.text import Text
+from textual.color import Color
 from textual.containers import VerticalScroll
 from textual.widgets import (
     Button,
@@ -35,6 +36,7 @@ from hermes_vps_app.panel_startup import (
     StartupStep,
 )
 from hermes_vps_app.panel_textual_app import HermesControlPanelApp
+from hermes_vps_app.telegram_gateway import TelegramGatewayValidationResult
 from scripts.configure_state import LabeledValue
 
 
@@ -1832,6 +1834,264 @@ class PanelTextualControlsTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(app.config_flow.draft.hermes.api_key.replacement, "hermes-secret")
                 self.assertFalse((root / ".env").exists())
 
+    async def test_gateways_step_renders_real_telegram_controls_without_placeholder(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            app = self._first_run_app_at_tmp(root)
+            app.config_flow.cloud_metadata_sync_runner = self._successful_cloud_sync
+
+            async with app.run_test() as pilot:
+                await self._advance_to_gateways_via_api_key(app, pilot)
+
+                self.assertFalse(app.query("#first-run-gateways-placeholder"))
+                self.assertIn(
+                    "Gateways",
+                    str(app.query_one("#first-run-step-title", Static).renderable),
+                )
+                visible_text = self._visible_first_run_step_text(app)
+                self.assertIn("How to get Telegram token", visible_text)
+                self.assertIn("How to get Telegram ID", visible_text)
+                self.assertIn("@BotFather", visible_text)
+                self.assertIn("@userinfobot", visible_text)
+                self.assertIn("@rawdatabot", visible_text)
+                self.assertEqual(
+                    str(app.query_one("#first-run-telegram-token-label", Label).renderable),
+                    "Enter Telegram bot token",
+                )
+                self.assertEqual(
+                    app.query_one("#first-run-telegram-token", Input).placeholder,
+                    "Paste Telegram bot token",
+                )
+                self.assertEqual(
+                    app.query_one("#first-run-telegram-allowlist", Input).placeholder,
+                    "123456789,-1001234567890",
+                )
+                self.assertTrue(app.query_one("#first-run-gateways-next", Button).disabled)
+
+    async def test_gateways_step_spacing_matches_operator_review(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            app = self._first_run_app_at_tmp(root)
+            app.config_flow.cloud_metadata_sync_runner = self._successful_cloud_sync
+
+            async with app.run_test() as pilot:
+                await self._advance_to_gateways_via_api_key(app, pilot)
+
+                main = app.query_one("#first-run-step-main", VerticalScroll)
+                visible_ids = [
+                    child.id
+                    for child in main.children
+                    if child.styles.display != "none" and child.id is not None
+                ]
+
+                def assert_after(first: str, second: str) -> None:
+                    self.assertLess(visible_ids.index(first), visible_ids.index(second))
+
+                assert_after("first-run-telegram-token-help", "first-run-telegram-token-help-spacer")
+                assert_after("first-run-telegram-token-help-spacer", "first-run-telegram-token-label")
+                assert_after("first-run-telegram-token", "first-run-telegram-token-after-spacer")
+                assert_after("first-run-telegram-token-after-spacer", "first-run-telegram-id-help")
+                assert_after("first-run-telegram-allowlist", "first-run-telegram-allowlist-after-spacer")
+                assert_after("first-run-telegram-allowlist-after-spacer", "first-run-gateways-next")
+                assert_after("first-run-gateways-next", "first-run-gateways-next-after-spacer")
+                assert_after("first-run-gateways-next-after-spacer", "first-run-gateways-step-status")
+
+    async def test_gateways_checking_status_is_blue_wave_after_next(self) -> None:
+        from tempfile import TemporaryDirectory
+        from threading import Event
+
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            app = self._first_run_app_at_tmp(root)
+            app.config_flow.cloud_metadata_sync_runner = self._successful_cloud_sync
+            started = Event()
+            release = Event()
+
+            class FakeValidator:
+                def validate_bot_token(self, token: str) -> TelegramGatewayValidationResult:
+                    started.set()
+                    _ = release.wait(timeout=2)
+                    return TelegramGatewayValidationResult(True, "ok", "Telegram gateway is valid: @hermes_bot.")
+
+            cast(Any, app).telegram_gateway_validator = FakeValidator()
+
+            async with app.run_test() as pilot:
+                await self._advance_to_gateways_via_api_key(app, pilot)
+                app.query_one("#first-run-telegram-token", Input).value = "123:SECRET"
+                app.query_one("#first-run-telegram-allowlist", Input).value = "123456789"
+                await pilot.pause()
+
+                _ = app.query_one("#first-run-gateways-next", Button).press()
+                await pilot.pause(0.05)
+
+                self.assertTrue(started.wait(timeout=2))
+                status = app.query_one("#first-run-gateways-step-status", Static)
+                progress_text = str(status.renderable)
+                self.assertIn("Checking Telegram gateway...", progress_text)
+                self.assertTrue(any(frame in progress_text for frame in "⢀⣠⣴⣾⣿⣷⣦⣄"))
+                self.assertEqual(status.styles.color, Color.parse("rgb(1,120,212)"))
+                release.set()
+
+    async def test_gateways_next_blocks_invalid_allowlist_before_service_call(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            app = self._first_run_app_at_tmp(root)
+            app.config_flow.cloud_metadata_sync_runner = self._successful_cloud_sync
+            calls: list[str] = []
+
+            class FakeValidator:
+                def validate_bot_token(self, token: str) -> TelegramGatewayValidationResult:
+                    calls.append(token)
+                    return TelegramGatewayValidationResult(True, "ok", "Telegram gateway is valid: @hermes_bot.")
+
+            cast(Any, app).telegram_gateway_validator = FakeValidator()
+
+            async with app.run_test() as pilot:
+                await self._advance_to_gateways_via_api_key(app, pilot)
+                app.query_one("#first-run-telegram-token", Input).value = "123:SECRET"
+                app.query_one("#first-run-telegram-allowlist", Input).value = "@not_allowed"
+                await pilot.pause()
+
+                next_button = app.query_one("#first-run-gateways-next", Button)
+                self.assertTrue(next_button.disabled)
+                _ = next_button.press()
+                await pilot.pause()
+
+                self.assertEqual(calls, [])
+                self.assertEqual(app.config_flow.current_step, "telegram")
+
+    async def test_gateways_success_moves_to_review_without_env_write(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            app = self._first_run_app_at_tmp(root)
+            app.config_flow.cloud_metadata_sync_runner = self._successful_cloud_sync
+            calls: list[str] = []
+
+            class FakeValidator:
+                def validate_bot_token(self, token: str) -> TelegramGatewayValidationResult:
+                    calls.append(token)
+                    return TelegramGatewayValidationResult(
+                        True,
+                        "ok",
+                        "Telegram gateway is valid: @hermes_bot.",
+                        bot_username="hermes_bot",
+                    )
+
+            cast(Any, app).telegram_gateway_validator = FakeValidator()
+
+            async with app.run_test() as pilot:
+                await self._advance_to_gateways_via_api_key(app, pilot)
+                app.query_one("#first-run-telegram-token", Input).value = "123:SECRET"
+                app.query_one("#first-run-telegram-allowlist", Input).value = "123456789,-1001234567890"
+                await pilot.pause()
+
+                next_button = app.query_one("#first-run-gateways-next", Button)
+                self.assertFalse(next_button.disabled)
+                _ = next_button.press()
+                await pilot.pause()
+
+                self.assertEqual(calls, ["123:SECRET"])
+                self.assertEqual(app.config_flow.current_step, "review_apply")
+                self.assertEqual(app.config_flow.draft.gateway.telegram_allowlist_ids, "123456789,-1001234567890")
+                self.assertEqual(app.config_flow.draft.gateway.telegram_bot_token.replacement, "123:SECRET")
+                self.assertFalse((root / ".env").exists())
+                self.assertIn(
+                    "TELEGRAM_BOT_TOKEN: <unset> -> <replaced>",
+                    self._visible_first_run_step_text(app),
+                )
+
+    async def test_gateways_preserves_existing_token_when_replacement_blank(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            app = self._first_run_app_at_tmp(root)
+            app.config_flow.draft.gateway.telegram_bot_token.present = True
+            app.config_flow.draft.gateway.telegram_allowlist_ids = "123456789"
+            app.config_flow.draft.original_env["TELEGRAM_BOT_TOKEN"] = "existing:SECRET"
+            app.config_flow.draft.original_env["TELEGRAM_ALLOWLIST_IDS"] = "123456789"
+            app.config_flow.cloud_metadata_sync_runner = self._successful_cloud_sync
+            calls: list[str] = []
+
+            class FakeValidator:
+                def validate_bot_token(self, token: str) -> TelegramGatewayValidationResult:
+                    calls.append(token)
+                    return TelegramGatewayValidationResult(
+                        True,
+                        "ok",
+                        "Telegram gateway is valid: @existing_bot.",
+                    )
+
+            cast(Any, app).telegram_gateway_validator = FakeValidator()
+
+            async with app.run_test() as pilot:
+                await self._advance_to_gateways_via_api_key(app, pilot)
+
+                self.assertEqual(
+                    str(app.query_one("#first-run-telegram-token-label", Label).renderable),
+                    "Existing Telegram bot token",
+                )
+                self.assertEqual(app.query_one("#first-run-telegram-token", Input).value, "")
+                next_button = app.query_one("#first-run-gateways-next", Button)
+                self.assertFalse(next_button.disabled)
+
+                _ = next_button.press()
+                await pilot.pause()
+
+                self.assertEqual(calls, ["existing:SECRET"])
+                self.assertEqual(app.config_flow.current_step, "review_apply")
+                self.assertIsNone(app.config_flow.draft.gateway.telegram_bot_token.replacement)
+                self.assertNotIn("TELEGRAM_BOT_TOKEN", self._visible_first_run_step_text(app))
+
+    async def test_gateways_stale_validation_result_reenables_next_for_current_inputs(self) -> None:
+        from tempfile import TemporaryDirectory
+        from threading import Event
+
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            app = self._first_run_app_at_tmp(root)
+            app.config_flow.cloud_metadata_sync_runner = self._successful_cloud_sync
+            started = Event()
+            release = Event()
+
+            class FakeValidator:
+                def validate_bot_token(self, token: str) -> TelegramGatewayValidationResult:
+                    started.set()
+                    _ = release.wait(timeout=2)
+                    return TelegramGatewayValidationResult(
+                        True,
+                        "ok",
+                        f"Telegram gateway is valid: @{token.replace(':', '_')}.",
+                    )
+
+            cast(Any, app).telegram_gateway_validator = FakeValidator()
+
+            async with app.run_test() as pilot:
+                await self._advance_to_gateways_via_api_key(app, pilot)
+                app.query_one("#first-run-telegram-token", Input).value = "old:TOKEN"
+                app.query_one("#first-run-telegram-allowlist", Input).value = "123456789"
+                await pilot.pause()
+                _ = app.query_one("#first-run-gateways-next", Button).press()
+                await pilot.pause()
+                self.assertTrue(started.wait(timeout=2))
+                self.assertTrue(app.query_one("#first-run-gateways-next", Button).disabled)
+
+                app.query_one("#first-run-telegram-token", Input).value = "new:TOKEN"
+                await pilot.pause()
+                release.set()
+                await pilot.pause()
+
+                self.assertEqual(app.config_flow.current_step, "telegram")
+                self.assertFalse(app.query_one("#first-run-gateways-next", Button).disabled)
+
     @staticmethod
     def _successful_cloud_sync(provider: ProviderId, token: str, selected_region: str | None) -> CloudMetadataSyncResult:
         return CloudMetadataSyncResult.success(
@@ -1895,6 +2155,15 @@ class PanelTextualControlsTests(unittest.IsolatedAsyncioTestCase):
         _ = app.query_one("#first-run-cloud-next", Button).press()
         await pause()
         _ = app.query_one("#first-run-host-ssh-next", Button).press()
+        await pause()
+
+    async def _advance_to_gateways_via_api_key(self, app: HermesControlPanelApp, pilot: object) -> None:
+        pause = getattr(pilot, "pause")
+        await self._advance_to_hermes(app, pilot)
+        app.query_one("#first-run-hermes-auth-method", Select).value = "api_key"
+        await pause()
+        app.query_one("#first-run-hermes-api-key", Input).value = "hermes-secret"
+        _ = app.query_one("#first-run-hermes-next", Button).press()
         await pause()
 
     @staticmethod

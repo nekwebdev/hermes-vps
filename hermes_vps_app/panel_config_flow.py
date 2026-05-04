@@ -40,6 +40,7 @@ _HERMES_PROVIDER_MODELS: dict[str, tuple[str, ...]] = {
     "anthropic": ("anthropic/claude-sonnet-4", "anthropic/claude-opus-4"),
 }
 _HERMES_AUTH_METHODS: tuple[HermesAuthMode, ...] = ("oauth", "api_key")
+_USE_VALIDATION_TOKEN = object()
 
 LiveLookup = Callable[[ProviderId, str], tuple[list[str] | tuple[str, ...], list[str] | tuple[str, ...]]]
 
@@ -575,7 +576,7 @@ class PanelConfigFlow:
             raise RuntimeError(
                 f"Selected Hermes returned no auth metadata for provider {provider_value}. Choose another provider or retry."
             )
-        live_auth_methods = tuple(
+        live_auth_methods: tuple[HermesAuthMode, ...] = tuple(
             cast(HermesAuthMode, item) for item in metadata.auth_methods if item in ("oauth", "api_key")
         )
         if not live_auth_methods:
@@ -719,8 +720,17 @@ class PanelConfigFlow:
             and artifact.auth_json_bytes
         )
 
-    def begin_telegram_validation(self, *, token: str, allowlist_ids: str) -> AsyncValidationRequest:
-        self.draft.gateway.telegram_bot_token = SecretDraft.replace(token)
+    def begin_telegram_validation(
+        self, *, token: str, allowlist_ids: str, replacement_token: str | None | object = _USE_VALIDATION_TOKEN
+    ) -> AsyncValidationRequest:
+        if replacement_token is _USE_VALIDATION_TOKEN:
+            replacement_token = token
+        if replacement_token is None:
+            self.draft.gateway.telegram_bot_token = SecretDraft.keep_existing(
+                self.draft.gateway.telegram_bot_token.present
+            )
+        else:
+            self.draft.gateway.telegram_bot_token = SecretDraft.replace(cast(str, replacement_token))
         self.draft.gateway.telegram_allowlist_ids = allowlist_ids
         self._telegram_request_counter += 1
         request = AsyncValidationRequest(
@@ -742,6 +752,12 @@ class PanelConfigFlow:
         self._telegram_validation_detail = result.detail
         self._telegram_pending = None
         return ValidationAcceptance(accepted=True, stale=False, ok=result.ok, detail=result.detail)
+
+    def invalidate_telegram_validation(self) -> None:
+        self._telegram_pending = None
+        self._telegram_validated_fingerprint = None
+        self._telegram_validation_ok = False
+        self._telegram_validation_detail = ""
 
     def review(self) -> ConfigReview:
         patch = self.env_service.create_patch(self.draft)
@@ -791,7 +807,7 @@ class PanelConfigFlow:
         if not allowlist or not logic.is_valid_telegram_allowlist(allowlist):
             issues.append("Telegram allowlist must contain comma-separated integer chat IDs")
         if self._telegram_requires_validation():
-            token = self.draft.gateway.telegram_bot_token.replacement or ""
+            token = self._current_telegram_validation_token()
             current_fingerprint = _telegram_fingerprint(token, allowlist)
             if self._telegram_validated_fingerprint != current_fingerprint:
                 issues.append("telegram validation is required")
@@ -808,6 +824,14 @@ class PanelConfigFlow:
         if original.get("TELEGRAM_ALLOWLIST_IDS", "") != self.draft.gateway.telegram_allowlist_ids:
             return True
         return not self.draft.gateway.telegram_bot_token.present
+
+    def _current_telegram_validation_token(self) -> str:
+        replacement = self.draft.gateway.telegram_bot_token.replacement
+        if replacement is not None:
+            return replacement
+        if self.draft.gateway.telegram_bot_token.present:
+            return self.draft.original_env.get("TELEGRAM_BOT_TOKEN", "")
+        return ""
 
 
 def _provider_failure(provider: ProviderId, reason: FailureReason, detail: str) -> ProviderLookupFailureDetail:

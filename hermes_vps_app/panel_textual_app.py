@@ -15,6 +15,11 @@ from hermes_vps_app.panel_config_flow import (
     HermesAuthMode,
     HermesDefaults,
     PanelConfigFlow,
+    AsyncValidationResult,
+)
+from hermes_vps_app.telegram_gateway import (
+    TelegramGatewayValidationResult,
+    TelegramGatewayValidator,
 )
 from hermes_vps_app.hermes_live_metadata import (
     HermesReleaseService,
@@ -31,6 +36,7 @@ from hermes_vps_app.hermes_oauth import (
 )
 from hermes_vps_app.panel_shell import ControlPanelShell, InitialPanel
 from hermes_vps_app.panel_startup import PanelStartupResult
+from scripts import configure_logic as logic
 
 try:
     from textual.app import App, ComposeResult
@@ -199,6 +205,11 @@ class HermesControlPanelApp(App[None]):
         )
         self.hermes_runtime_metadata_service = HermesRuntimeMetadataService()
         self.hermes_oauth_runner = HermesOAuthRunner(repo_root=self.repo_root)
+        self.telegram_gateway_validator = TelegramGatewayValidator()
+        self._telegram_validation_loading = False
+        self._telegram_status_timer: Timer | None = None
+        self._telegram_status_animation_index = 0
+        self._telegram_status_loading_message = ""
 
     @override
     def compose(self) -> ComposeResult:
@@ -264,6 +275,9 @@ class HermesControlPanelApp(App[None]):
         if button_id == "first-run-hermes-next":
             self._advance_first_run_hermes_step()
             return
+        if button_id == "first-run-gateways-next":
+            self._advance_first_run_gateways_step()
+            return
         if button_id == "first-run-cloud-sync":
             self._sync_first_run_cloud_metadata()
             return
@@ -308,6 +322,7 @@ class HermesControlPanelApp(App[None]):
             "first-run-cloud-check",
             "first-run-hermes-live-metadata",
             "first-run-hermes-oauth",
+            "first-run-telegram-validation",
         ) or event.state not in (
             WorkerState.SUCCESS,
             WorkerState.ERROR,
@@ -390,6 +405,28 @@ class HermesControlPanelApp(App[None]):
                 return
             self._finish_first_run_hermes_oauth(result)
             return
+        if event.state == WorkerState.SUCCESS and worker.name == "first-run-telegram-validation":
+            validation_result, async_result = cast(
+                tuple[TelegramGatewayValidationResult, AsyncValidationResult], worker.result
+            )
+            acceptance = self.config_flow.complete_telegram_validation(async_result)
+            self._telegram_validation_loading = False
+            self._stop_telegram_status_animation()
+            if acceptance.stale:
+                self._set_first_run_gateways_step_status(
+                    "Gateway inputs changed. Run Telegram check again."
+                )
+                self._refresh_first_run_gateways_next_state()
+                self._refresh_first_run_sidebar()
+                return
+            if acceptance.ok and validation_result.ok:
+                self._set_first_run_gateways_step_status(validation_result.summary)
+                self._render_first_run_review_step()
+            else:
+                self._set_first_run_gateways_step_status(acceptance.detail, color="red")
+                self._refresh_first_run_gateways_next_state()
+            self._refresh_first_run_sidebar()
+            return
         if event.state in (WorkerState.ERROR, WorkerState.CANCELLED):
             if worker.name == "first-run-hermes-oauth":
                 request_id = self._hermes_oauth_request_id
@@ -422,6 +459,14 @@ class HermesControlPanelApp(App[None]):
                 self._set_first_run_cloud_step_status(
                     "Live cloud metadata sync failed. Retry Sync.", color="red"
                 )
+            if worker.name == "first-run-telegram-validation":
+                self._telegram_validation_loading = False
+                self._stop_telegram_status_animation()
+                self._set_first_run_gateways_step_status(
+                    "Unable to reach Telegram API. Please retry.", color="red"
+                )
+                self._refresh_first_run_gateways_next_state()
+                return
 
     def on_select_changed(self, event: Select.Changed) -> None:
         if event.select.id == "first-run-hermes-provider":
@@ -501,6 +546,11 @@ class HermesControlPanelApp(App[None]):
         self._refresh_first_run_cloud_next_state()
 
     def on_input_changed(self, event: Input.Changed) -> None:
+        if event.input.id == "first-run-telegram-token" or event.input.id == "first-run-telegram-allowlist":
+            self.config_flow.invalidate_telegram_validation()
+            self._refresh_first_run_sidebar()
+            self._refresh_first_run_gateways_next_state()
+            return
         if event.input.id != "first-run-cloud-token":
             return
         self.config_flow.invalidate_cloud_live_check()
@@ -558,6 +608,38 @@ class HermesControlPanelApp(App[None]):
         self._cloud_status_animation_index += 1
         self._set_first_run_cloud_step_status(
             f"{wave} {self._cloud_status_loading_message}", color="rgb(1,120,212)"
+        )
+
+    def _start_telegram_status_animation(self, message: str) -> None:
+        self._telegram_status_loading_message = message
+        self._telegram_status_animation_index = 1
+        self._tick_telegram_status_animation()
+        if self._telegram_status_timer is None:
+            self._telegram_status_timer = self.set_interval(
+                0.12, self._tick_telegram_status_animation
+            )
+            return
+        self._telegram_status_timer.resume()
+
+    def _stop_telegram_status_animation(self) -> None:
+        if self._telegram_status_timer is not None:
+            self._telegram_status_timer.pause()
+
+    def _telegram_loading_wave(self) -> str:
+        frames = self.CLOUD_LOADING_FRAMES
+        start = self._telegram_status_animation_index % len(frames)
+        return "".join(frames[(start + offset) % len(frames)] for offset in range(3))
+
+    def _tick_telegram_status_animation(self) -> None:
+        if (
+            not self._telegram_validation_loading
+            or not self._telegram_status_loading_message
+        ):
+            return
+        wave = self._telegram_loading_wave()
+        self._telegram_status_animation_index += 1
+        self._set_first_run_gateways_step_status(
+            f"{wave} {self._telegram_status_loading_message}", color="rgb(1,120,212)"
         )
 
     def _summary_text(self) -> str:
@@ -1600,16 +1682,157 @@ class HermesControlPanelApp(App[None]):
             self._refresh_first_run_sidebar()
             return
         self._set_first_run_hermes_step_status(result.message)
+        self._render_first_run_gateways_step()
+
+    def _render_first_run_gateways_step(self) -> None:
+        self._hide_first_run_step_body()
+        self.config_flow.current_step = "telegram"
+        main = self._first_run_step_main()
         self.query_one("#first-run-step-title", Static).update(
             "First-run configuration wizard: Gateways"
         )
+        token_present = self.config_flow.draft.gateway.telegram_bot_token.present
+        token_label = "Existing Telegram bot token" if token_present else "Enter Telegram bot token"
+        token_placeholder = (
+            "Paste Telegram bot token to replace existing one"
+            if token_present
+            else "Paste Telegram bot token"
+        )
+        main.mount(
+            Static("Telegram gateway", classes="panel-title", id="first-run-gateways-kind-title"),
+            Static(
+                "How to get Telegram token\n"
+                "1) Message @BotFather in Telegram.\n"
+                "2) Create or choose a bot.\n"
+                "3) Paste the bot token below.",
+                id="first-run-telegram-token-help",
+            ),
+            self._first_run_spacer("first-run-telegram-token-help-spacer"),
+            Label(token_label, id="first-run-telegram-token-label"),
+            self._first_run_spacer("first-run-telegram-token-spacer"),
+            Input(
+                placeholder=token_placeholder,
+                password=True,
+                id="first-run-telegram-token",
+            ),
+            self._first_run_spacer("first-run-telegram-token-after-spacer"),
+            Static(
+                "How to get Telegram ID\n"
+                "Message @userinfobot for your user ID or @rawdatabot for a group/chat ID.\n"
+                "Multiple IDs are supported as comma-separated numeric IDs.",
+                id="first-run-telegram-id-help",
+            ),
+            Label("Telegram allowed chat/user IDs"),
+            Static(
+                "Use comma-separated numeric IDs. Groups/channels often start with -100.",
+                id="first-run-telegram-allowlist-helper",
+            ),
+            self._first_run_spacer("first-run-telegram-allowlist-spacer"),
+            Input(
+                value=self.config_flow.draft.gateway.telegram_allowlist_ids,
+                placeholder="123456789,-1001234567890",
+                id="first-run-telegram-allowlist",
+            ),
+            self._first_run_spacer("first-run-telegram-allowlist-after-spacer"),
+            Button(
+                "Next: Review",
+                id="first-run-gateways-next",
+                variant="primary",
+                disabled=True,
+            ),
+            self._first_run_spacer("first-run-gateways-next-after-spacer"),
+            Static("", id="first-run-gateways-step-status"),
+        )
+        self._refresh_first_run_gateways_next_state()
         self._refresh_first_run_sidebar()
-        if not self.query("#first-run-gateways-placeholder"):
-            self._first_run_step_main().mount(
-                Static(
-                    "Gateways step placeholder.", id="first-run-gateways-placeholder"
+
+    def _effective_telegram_token(self) -> str:
+        try:
+            token = self.query_one("#first-run-telegram-token", Input).value.strip()
+        except Exception:
+            token = ""
+        if token:
+            return token
+        if not self.config_flow.draft.gateway.telegram_bot_token.present:
+            return ""
+        return self.config_flow.draft.original_env.get("TELEGRAM_BOT_TOKEN", "").strip()
+
+    def _refresh_first_run_gateways_next_state(self) -> None:
+        try:
+            button = self.query_one("#first-run-gateways-next", Button)
+            token_present = bool(self._effective_telegram_token())
+            allowlist = self.query_one("#first-run-telegram-allowlist", Input).value.strip()
+            button.disabled = self._telegram_validation_loading or not (
+                token_present and bool(allowlist) and logic.is_valid_telegram_allowlist(allowlist)
+            )
+        except Exception:
+            return
+
+    def _set_first_run_gateways_step_status(self, message: str, *, color: str = "white") -> None:
+        try:
+            status = self.query_one("#first-run-gateways-step-status", Static)
+            status.update(message)
+            status.styles.color = color
+        except Exception:
+            return
+
+    def _advance_first_run_gateways_step(self) -> None:
+        if self._telegram_validation_loading:
+            return
+        token = self.query_one("#first-run-telegram-token", Input).value.strip()
+        allowlist = self.query_one("#first-run-telegram-allowlist", Input).value.strip()
+        effective_token = self._effective_telegram_token()
+        if not effective_token:
+            self._set_first_run_gateways_step_status("Missing Telegram bot token.", color="red")
+            self._refresh_first_run_gateways_next_state()
+            return
+        if not allowlist or not logic.is_valid_telegram_allowlist(allowlist):
+            self._set_first_run_gateways_step_status(
+                "Telegram allowlist must contain comma-separated numeric IDs.", color="red"
+            )
+            self._refresh_first_run_gateways_next_state()
+            return
+        request = self.config_flow.begin_telegram_validation(
+            token=effective_token,
+            allowlist_ids=allowlist,
+            replacement_token=token or None,
+        )
+        self._telegram_validation_loading = True
+        self._start_telegram_status_animation("Checking Telegram gateway...")
+        self._refresh_first_run_gateways_next_state()
+
+        def validate() -> tuple[TelegramGatewayValidationResult, AsyncValidationResult]:
+            result = self.telegram_gateway_validator.validate_bot_token(effective_token)
+            async_result = (
+                AsyncValidationResult.success(
+                    request_id=request.request_id,
+                    fingerprint=request.fingerprint,
+                    detail=result.summary,
+                )
+                if result.ok
+                else AsyncValidationResult.failure(
+                    request_id=request.request_id,
+                    fingerprint=request.fingerprint,
+                    detail=result.summary,
                 )
             )
+            return result, async_result
+
+        _ = self.run_worker(validate, name="first-run-telegram-validation", thread=True)
+
+    def _render_first_run_review_step(self) -> None:
+        self._hide_first_run_step_body()
+        self.config_flow.current_step = "review_apply"
+        review = self.config_flow.review()
+        self.query_one("#first-run-step-title", Static).update(
+            "First-run configuration wizard: Review"
+        )
+        self._first_run_step_main().mount(
+            Static("Review / Apply", classes="panel-title", id="first-run-review-title"),
+            Static(review.redacted_diff, id="first-run-review-diff"),
+            Static("No .env changes are written until Apply.", id="first-run-review-helper"),
+        )
+        self._refresh_first_run_sidebar()
 
     @staticmethod
     def _cloud_region_label(region_value: str) -> str:
