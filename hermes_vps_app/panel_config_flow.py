@@ -2,16 +2,18 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+import os
 from pathlib import Path
 import re
 import shutil
 from typing import Any, Literal, cast, final
 
-from scripts.configure_services import CommandRunner, ConfigureServiceError, ProviderAuthError, ProviderService
+from scripts.configure_services import CommandRunner, ConfigureOrchestrator, ConfigureServiceError, ProviderAuthError, ProviderService
 
 from hermes_vps_app.cloud_remediation import CloudRemediationPayload, FailureReason, ProviderId, remediation_for
 from hermes_vps_app.config_model import (
     EnvPatch,
+    EnvChange,
     ProjectConfigDraft,
     ProjectConfigEnvService,
     SecretDraft,
@@ -236,6 +238,21 @@ class ConfigReview:
     redacted_diff: str
     can_apply: bool
     blocking_issues: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class ConfigApplyResult:
+    ok: bool
+    message: str
+    status_lines: tuple[str, ...]
+    env_written: bool = False
+    ssh_key_ready: bool = False
+    ssh_alias_reconciled: bool = False
+    ssh_alias_removed: bool = False
+    oauth_artifact_written: bool = False
+
+
+ProgressCallback = Callable[[str], None]
 
 
 @final
@@ -702,6 +719,24 @@ class PanelConfigFlow:
     def clear_hermes_oauth_artifact(self) -> None:
         self._hermes_oauth_artifact = None
 
+    def hermes_oauth_artifact_for_review(self) -> HermesOAuthArtifact | None:
+        return self._hermes_oauth_artifact
+
+    def review_action_lines(self) -> tuple[str, ...]:
+        lines = [
+            f"SSH key: will ensure {self.draft.server.ssh_private_key_path}",
+            "SSH public key: will update TF_VAR_admin_ssh_public_key",
+            "SSH alias: active" if self.draft.server.add_ssh_alias else "SSH alias: inactive",
+        ]
+        artifact = self._hermes_oauth_artifact
+        if self.hermes_auth_mode == "oauth" and artifact is not None:
+            lines.append(
+                "Hermes OAuth artifact: captured for "
+                f"{artifact.provider} {artifact.agent_version} ({artifact.auth_json_sha256[:12]}), "
+                "will write .hermes-home/auth.json at Apply."
+            )
+        return tuple(lines)
+
     def has_current_hermes_oauth_artifact(
         self,
         *,
@@ -769,11 +804,157 @@ class PanelConfigFlow:
             blocking_issues=tuple(issues),
         )
 
-    def apply_review(self, review: ConfigReview) -> None:
+    def apply_review(self, review: ConfigReview, progress: ProgressCallback | None = None) -> ConfigApplyResult:
+        def emit(message: str) -> None:
+            if progress is not None:
+                progress(message)
+
         if not review.can_apply:
             joined = "; ".join(review.blocking_issues)
-            raise ValueError(f"configuration review cannot be applied: {joined}")
-        self.env_service.write_patch(review.patch)
+            return ConfigApplyResult(ok=False, message=joined, status_lines=(joined,))
+
+        emit("Applying configuration...")
+        artifact = self._matching_oauth_artifact_for_apply()
+        temp_auth_path: Path | None = None
+        if artifact is not None:
+            try:
+                temp_auth_path = self._prepare_oauth_temp_artifact(artifact)
+            except OSError as exc:
+                message = f"Configuration apply incomplete: Hermes OAuth artifact could not be prepared: {exc}"
+                return ConfigApplyResult(ok=False, message=message, status_lines=(message,))
+
+        try:
+            emit("Ensuring SSH key material...")
+            ssh_private_path, public_key = self._ensure_ssh_key_material()
+            self.draft.server.ssh_private_key_path = ssh_private_path
+            patch = self._patch_with_ssh_material(review.patch, ssh_private_path, public_key)
+            emit("Writing .env...")
+            self.env_service.write_patch(patch)
+        except Exception:
+            if temp_auth_path is not None:
+                temp_auth_path.unlink(missing_ok=True)
+            return ConfigApplyResult(
+                ok=False,
+                message="Configuration apply failed. No OAuth artifact was written.",
+                status_lines=("Configuration apply failed. No OAuth artifact was written.",),
+            )
+
+        try:
+            emit("Reconciling SSH alias...")
+            self._reconcile_ssh_alias()
+        except Exception:
+            return ConfigApplyResult(
+                ok=False,
+                message="Configuration apply incomplete: .env was written but SSH alias was not reconciled. Retry Apply.",
+                status_lines=("Configuration apply incomplete: .env was written but SSH alias was not reconciled. Retry Apply.",),
+                env_written=True,
+                ssh_key_ready=True,
+            )
+
+        oauth_written = False
+        if artifact is not None and temp_auth_path is not None:
+            emit("Writing Hermes OAuth artifact...")
+            try:
+                os.replace(temp_auth_path, self._durable_oauth_artifact_path())
+                self._durable_oauth_artifact_path().chmod(0o600)
+                self._hermes_oauth_artifact = None
+                oauth_written = True
+            except Exception:
+                return ConfigApplyResult(
+                    ok=False,
+                    message="Configuration apply incomplete: .env was written but Hermes OAuth artifact was not finalized. Retry Apply.",
+                    status_lines=("Configuration apply incomplete: .env was written but Hermes OAuth artifact was not finalized. Retry Apply.",),
+                    env_written=True,
+                    ssh_key_ready=True,
+                    ssh_alias_reconciled=self.draft.server.add_ssh_alias,
+                    ssh_alias_removed=not self.draft.server.add_ssh_alias,
+                )
+
+        lines = [
+            "Configuration applied.",
+            ".env written.",
+            "SSH key material ready.",
+            "SSH alias reconciled." if self.draft.server.add_ssh_alias else "SSH alias removed.",
+        ]
+        if oauth_written:
+            lines.append("Hermes OAuth artifact written.")
+        lines.append("Next: Deploy")
+        return ConfigApplyResult(
+            ok=True,
+            message="Configuration applied.",
+            status_lines=tuple(lines),
+            env_written=True,
+            ssh_key_ready=True,
+            ssh_alias_reconciled=self.draft.server.add_ssh_alias,
+            ssh_alias_removed=not self.draft.server.add_ssh_alias,
+            oauth_artifact_written=oauth_written,
+        )
+
+    def _matching_oauth_artifact_for_apply(self) -> HermesOAuthArtifact | None:
+        if self.hermes_auth_mode != "oauth":
+            return None
+        artifact = self._hermes_oauth_artifact
+        if artifact is None:
+            return None
+        if not self.has_current_hermes_oauth_artifact(
+            agent_version=self.draft.hermes.agent_version,
+            agent_release_tag=self.draft.hermes.agent_release_tag,
+            provider=self.draft.hermes.provider,
+            auth_method="oauth",
+        ):
+            raise ValueError("Run OAuth again for current Hermes selection.")
+        return artifact
+
+    def _prepare_oauth_temp_artifact(self, artifact: HermesOAuthArtifact) -> Path:
+        home = self.repo_root / ".hermes-home"
+        home.mkdir(parents=True, exist_ok=True)
+        tmp_path = home / ".auth.json.tmp"
+        fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(artifact.auth_json_bytes)
+                handle.flush()
+                os.fsync(handle.fileno())
+        except Exception:
+            tmp_path.unlink(missing_ok=True)
+            raise
+        tmp_path.chmod(0o600)
+        return tmp_path
+
+    def _durable_oauth_artifact_path(self) -> Path:
+        return self.repo_root / ".hermes-home" / "auth.json"
+
+    def _ensure_ssh_key_material(self) -> tuple[str, str]:
+        orchestrator = ConfigureOrchestrator(self.repo_root)
+        return orchestrator.ensure_ssh_key_material(self.draft.server.ssh_private_key_path)
+
+    def _reconcile_ssh_alias(self) -> None:
+        orchestrator = ConfigureOrchestrator(self.repo_root)
+        if self.draft.server.add_ssh_alias:
+            orchestrator.ensure_repo_ssh_alias(
+                self.draft.server.admin_username,
+                self.draft.server.ssh_private_key_path,
+                self.draft.server.ssh_port or "22",
+                self.draft.server.hostname,
+            )
+        else:
+            orchestrator.remove_repo_ssh_alias()
+
+    @staticmethod
+    def _patch_with_ssh_material(patch: EnvPatch, private_path: str, public_key: str) -> EnvPatch:
+        values = dict(patch.values)
+        values["BOOTSTRAP_SSH_PRIVATE_KEY_PATH"] = private_path
+        values["TF_VAR_admin_ssh_public_key"] = public_key
+        changes: list[EnvChange] = [
+            change for change in patch.changes if change.key not in {"BOOTSTRAP_SSH_PRIVATE_KEY_PATH", "TF_VAR_admin_ssh_public_key"}
+        ]
+        changes.extend(
+            (
+                EnvChange("BOOTSTRAP_SSH_PRIVATE_KEY_PATH", "", values["BOOTSTRAP_SSH_PRIVATE_KEY_PATH"]),
+                EnvChange("TF_VAR_admin_ssh_public_key", "", values["TF_VAR_admin_ssh_public_key"]),
+            )
+        )
+        return EnvPatch(tuple(changes))
 
     def _display(self) -> dict[str, dict[str, str]]:
         display = self.draft.to_display_dict()
@@ -803,6 +984,13 @@ class PanelConfigFlow:
             self.draft.hermes.api_key.present or self.draft.hermes.api_key.replacement
         ):
             issues.append("Hermes API key is required for API-key auth")
+        if self.mode == "first_run" and self.hermes_auth_mode == "oauth" and not self.has_current_hermes_oauth_artifact(
+            agent_version=self.draft.hermes.agent_version,
+            agent_release_tag=self.draft.hermes.agent_release_tag,
+            provider=self.draft.hermes.provider,
+            auth_method="oauth",
+        ):
+            issues.append("Run OAuth again for current Hermes selection.")
         allowlist = self.draft.gateway.telegram_allowlist_ids
         if not allowlist or not logic.is_valid_telegram_allowlist(allowlist):
             issues.append("Telegram allowlist must contain comma-separated integer chat IDs")

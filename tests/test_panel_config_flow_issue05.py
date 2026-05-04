@@ -7,6 +7,7 @@ import pytest
 
 from hermes_vps_app.config_model import SecretDraft
 from hermes_vps_app.hermes_live_metadata import HermesRelease, HermesRuntimeMetadata, ToolchainCacheResult
+from hermes_vps_app.hermes_oauth import HermesOAuthRunResult
 from hermes_vps_app.panel_config_flow import (
     AsyncValidationResult,
     PanelConfigFlow,
@@ -125,7 +126,7 @@ def test_first_run_covers_all_sections_and_review_redacts_before_atomic_apply(tm
         hostname="hermes-prod-01",
         admin_username="opsadmin",
         admin_group="sshadmins",
-        ssh_private_key_path="/home/me/.ssh/id_ed25519",
+        ssh_private_key_path=str(tmp_path.parent / f"{tmp_path.name}-id_ed25519"),
     )
     flow.set_hermes_api_key(
         provider="openai-codex",
@@ -512,7 +513,7 @@ def _complete_first_run_flow(tmp_path: Path) -> PanelConfigFlow:
         hostname="hermes-prod-01",
         admin_username="opsadmin",
         admin_group="sshadmins",
-        ssh_private_key_path="/home/me/.ssh/id_ed25519",
+        ssh_private_key_path=str(tmp_path.parent / f"{tmp_path.name}-id_ed25519"),
     )
     flow.set_hermes_api_key(
         provider="openai-codex",
@@ -529,15 +530,14 @@ def _complete_first_run_flow(tmp_path: Path) -> PanelConfigFlow:
 
 
 def test_apply_review_without_env_example_does_not_create_or_modify_template(tmp_path: Path) -> None:
-    from scripts.configure_services import ConfigureServiceError
-
     flow = _complete_first_run_flow(tmp_path)
     review = flow.review()
 
     assert review.can_apply is True
-    with pytest.raises(ConfigureServiceError, match="missing env template"):
-        flow.apply_review(review)
+    result = flow.apply_review(review)
 
+    assert result.ok is False
+    assert result.message == "Configuration apply failed. No OAuth artifact was written."
     assert not (tmp_path / ".env.example").exists()
     assert not (tmp_path / ".env").exists()
 
@@ -593,6 +593,21 @@ def test_telegram_validation_is_explicit_and_stale_or_failed_results_cannot_be_p
     flow.set_cloud(provider="hetzner", lookup_mode="sample")
     flow.set_server(location="nbg1", server_type="cx22", hostname="h", admin_username="u", admin_group="g", ssh_private_key_path="/k")
     flow.set_hermes_oauth(provider="anthropic-oauth", model="claude", agent_version="0.10.0")
+    flow.record_hermes_oauth_result(
+        HermesOAuthRunResult(
+            status="succeeded",
+            provider="anthropic-oauth",
+            agent_version="0.10.0",
+            agent_release_tag="",
+            auth_method="oauth",
+            auth_json_bytes=b"{}",
+            auth_json_sha256="0" * 64,
+            instructions=(),
+            output_tail="",
+            exit_code=0,
+            error_message=None,
+        )
+    )
 
     first = flow.begin_telegram_validation(token="old-token", allowlist_ids="12345")
     second = flow.begin_telegram_validation(token="new-token", allowlist_ids="67890")

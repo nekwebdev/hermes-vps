@@ -67,11 +67,15 @@ Use a draft-then-apply OAuth artifact lifecycle for Hermes provider OAuth.
 
 8. Apply transaction
 - API-key auth mode remains unchanged.
-- For fresh OAuth artifacts, Review/Apply validates that the captured artifact matches the current Hermes selection, creates `.hermes-home/`, writes `.hermes-home/.auth.json.tmp` with owner-only permissions, writes `.env` through the existing atomic env path, then renames the temp artifact to `.hermes-home/auth.json`.
+- Global configuration Apply first ensures Host & SSH key material, generating the selected ed25519 key pair if missing, and uses the public key to update the env patch inputs before writing `.env`.
+- For fresh OAuth artifacts, Review/Apply validates that the captured artifact matches the current Hermes selection, creates `.hermes-home/`, and writes `.hermes-home/.auth.json.tmp` with owner-only permissions before the `.env` write.
+- Apply writes `.env` through the existing template-preserving atomic env path, then reconciles the repo-owned SSH alias/include state, then renames the temp OAuth artifact to `.hermes-home/auth.json`.
+- OAuth finalization happens last so durable OAuth state is not finalized if `.env` writing or Host & SSH side effects fail.
 - When OAuth mode has a fresh matching captured artifact, Apply overwrites any existing `.hermes-home/auth.json` without a second replace prompt; completing `Start OAuth` is the operator's replacement intent.
 - If `.env` writing fails, Apply deletes the temp artifact and does not leave durable OAuth state.
-- If final auth rename fails after `.env` is written, Apply reports failure and a retry may complete the auth write from the still-open draft.
-- For keep-existing OAuth, Apply writes `.env` only and does not rewrite `.hermes-home/auth.json`.
+- If SSH alias reconciliation fails after `.env` is written, Apply reports an incomplete, retryable configuration Apply and keeps the in-memory OAuth artifact when OAuth finalization has not run yet.
+- If final auth rename fails after `.env` and SSH side effects are complete, Apply reports failure and a retry may complete the auth write from the still-open draft.
+- For keep-existing OAuth, Apply writes `.env` and performs Host & SSH effects only; it does not rewrite `.hermes-home/auth.json`.
 
 9. Future bootstrap contract
 - Deploy/bootstrap artifact staging is deferred until after configuration steps are complete.

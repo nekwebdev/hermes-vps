@@ -28,7 +28,7 @@ from hermes_vps_app.hermes_oauth import (
     HermesOAuthOutputEvent,
     HermesOAuthRunResult,
 )
-from hermes_vps_app.panel_config_flow import CloudMetadataSyncResult, HermesDefaults
+from hermes_vps_app.panel_config_flow import AsyncValidationResult, CloudMetadataSyncResult, ConfigApplyResult, HermesDefaults
 from hermes_vps_app.panel_shell import ControlPanelShell
 from hermes_vps_app.panel_startup import (
     PanelStartupResult,
@@ -2184,6 +2184,132 @@ class PanelTextualControlsTests(unittest.IsolatedAsyncioTestCase):
             if renderable is not None:
                 parts.append(str(renderable))
         return "\n".join(parts)
+    async def test_first_run_review_renders_apply_configuration_and_secret_safe_action_lines(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / ".env.example").write_text("", encoding="utf-8")
+            startup = _configuration_required_startup()
+            app = HermesControlPanelApp(
+                shell=ControlPanelShell(startup_result=startup, initial_panel="configuration"),
+                repo_root=root,
+                startup_result=startup,
+                initial_panel="configuration",
+            )
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                flow = app.config_flow
+                flow.draft.provider.hcloud_token.present = True
+                flow.draft.server.location = "nbg1"
+                flow.draft.server.server_type = "cx22"
+                flow.draft.server.image = "debian-13"
+                flow.draft.server.hostname = "hermes.example.test"
+                flow.draft.server.admin_username = "opsadmin"
+                flow.draft.server.admin_group = "sshadmins"
+                flow.draft.server.ssh_private_key_path = "~/.ssh/hermes-vps"
+                flow.draft.server.add_ssh_alias = True
+                flow.set_hermes_oauth(
+                    provider="openai-codex",
+                    model="gpt-5.4-mini",
+                    agent_version="0.10.0",
+                    agent_release_tag="v2026.4.16",
+                )
+                flow.record_hermes_oauth_result(
+                    HermesOAuthRunResult(
+                        status="succeeded",
+                        provider="openai-codex",
+                        agent_version="0.10.0",
+                        agent_release_tag="v2026.4.16",
+                        auth_method="oauth",
+                        auth_json_bytes=b'{"access_token":"super-secret-oauth"}',
+                        auth_json_sha256="abcdef1234567890" * 4,
+                        instructions=(),
+                        output_tail="",
+                        exit_code=0,
+                        error_message=None,
+                    )
+                )
+                req = flow.begin_telegram_validation(token="telegram-secret", allowlist_ids="12345", replacement_token="telegram-secret")
+                flow.complete_telegram_validation(AsyncValidationResult.success(request_id=req.request_id, fingerprint=req.fingerprint, detail="ok"))
+
+                app._render_first_run_review_step()
+                await pilot.pause()
+
+                self.assertEqual(str(app.query_one("#first-run-review-apply", Button).label), "Apply configuration")
+                review_text = self._visible_first_run_step_text(app)
+                self.assertIn("SSH key: will ensure ~/.ssh/hermes-vps", review_text)
+                self.assertIn("SSH public key: will update TF_VAR_admin_ssh_public_key", review_text)
+                self.assertIn("SSH alias: active", review_text)
+                self.assertIn("Hermes OAuth artifact: captured for openai-codex 0.10.0 (abcdef123456)", review_text)
+                self.assertIn("No Deployment runs automatically.", review_text)
+                self.assertNotIn("super-secret-oauth", review_text)
+                self.assertNotIn("telegram-secret", review_text)
+                self.assertNotIn("abcdef1234567890abcdef", review_text)
+
+    async def test_first_run_review_apply_runs_worker_disables_button_and_shows_success_without_deploy(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / ".env.example").write_text("", encoding="utf-8")
+            startup = _configuration_required_startup()
+            app = HermesControlPanelApp(
+                shell=ControlPanelShell(startup_result=startup, initial_panel="configuration"),
+                repo_root=root,
+                startup_result=startup,
+                initial_panel="configuration",
+            )
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                flow = app.config_flow
+                flow.draft.provider.hcloud_token.present = True
+                flow.draft.server.location = "nbg1"
+                flow.draft.server.server_type = "cx22"
+                flow.draft.server.image = "debian-13"
+                flow.draft.server.hostname = "hermes.example.test"
+                flow.draft.server.admin_username = "opsadmin"
+                flow.draft.server.admin_group = "sshadmins"
+                flow.draft.server.ssh_private_key_path = "~/.ssh/hermes-vps"
+                flow.set_hermes_api_key(
+                    provider="openai-codex",
+                    model="gpt-5.4-mini",
+                    api_key="hermes-secret",
+                    agent_version="0.10.0",
+                    agent_release_tag="v2026.4.16",
+                )
+                req = flow.begin_telegram_validation(token="telegram-secret", allowlist_ids="12345", replacement_token="telegram-secret")
+                flow.complete_telegram_validation(AsyncValidationResult.success(request_id=req.request_id, fingerprint=req.fingerprint, detail="ok"))
+
+                def fake_apply(review: object, progress: object | None = None) -> ConfigApplyResult:
+                    if callable(progress):
+                        progress("Ensuring SSH key material...")
+                        progress("Writing .env...")
+                        progress("Reconciling SSH alias...")
+                    return ConfigApplyResult(
+                        ok=True,
+                        message="Configuration applied.",
+                        status_lines=("Configuration applied.", ".env written.", "SSH key material ready.", "SSH alias reconciled.", "Next: Deploy"),
+                        env_written=True,
+                        ssh_key_ready=True,
+                        ssh_alias_reconciled=True,
+                    )
+
+                flow.apply_review = fake_apply  # type: ignore[method-assign]
+                app._render_first_run_review_step()
+                await pilot.pause()
+                _ = app.query_one("#first-run-review-apply", Button).press()
+                await pilot.pause()
+                self.assertTrue(app.query_one("#first-run-review-apply", Button).disabled)
+                await pilot.pause(0.2)
+
+                status_text = str(app.query_one("#first-run-apply-status", Static).renderable)
+                self.assertIn("Configuration applied.", status_text)
+                self.assertIn(".env written.", status_text)
+                self.assertIn("SSH key material ready.", status_text)
+                self.assertIn("SSH alias reconciled.", status_text)
+                self.assertIn("Next: Deploy", status_text)
+                self.assertEqual(app.query_one("#main-tabs", TabbedContent).active, "configuration")
 
 
 if __name__ == "__main__":

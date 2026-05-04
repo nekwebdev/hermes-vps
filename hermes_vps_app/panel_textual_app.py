@@ -12,6 +12,7 @@ from hermes_vps_app.config_model import SecretDraft
 from hermes_vps_app.panel_config_flow import (
     CloudLookupMode,
     CloudMetadataSyncResult,
+    ConfigApplyResult,
     HermesAuthMode,
     HermesDefaults,
     PanelConfigFlow,
@@ -210,6 +211,7 @@ class HermesControlPanelApp(App[None]):
         self._telegram_status_timer: Timer | None = None
         self._telegram_status_animation_index = 0
         self._telegram_status_loading_message = ""
+        self._first_run_apply_loading = False
 
     @override
     def compose(self) -> ComposeResult:
@@ -278,6 +280,9 @@ class HermesControlPanelApp(App[None]):
         if button_id == "first-run-gateways-next":
             self._advance_first_run_gateways_step()
             return
+        if button_id == "first-run-review-apply":
+            self._apply_first_run_review_configuration()
+            return
         if button_id == "first-run-cloud-sync":
             self._sync_first_run_cloud_metadata()
             return
@@ -323,6 +328,7 @@ class HermesControlPanelApp(App[None]):
             "first-run-hermes-live-metadata",
             "first-run-hermes-oauth",
             "first-run-telegram-validation",
+            "first-run-config-apply",
         ) or event.state not in (
             WorkerState.SUCCESS,
             WorkerState.ERROR,
@@ -427,6 +433,10 @@ class HermesControlPanelApp(App[None]):
                 self._refresh_first_run_gateways_next_state()
             self._refresh_first_run_sidebar()
             return
+        if event.state == WorkerState.SUCCESS and worker.name == "first-run-config-apply":
+            result = cast(ConfigApplyResult, worker.result)
+            self._finish_first_run_config_apply(result)
+            return
         if event.state in (WorkerState.ERROR, WorkerState.CANCELLED):
             if worker.name == "first-run-hermes-oauth":
                 request_id = self._hermes_oauth_request_id
@@ -466,6 +476,15 @@ class HermesControlPanelApp(App[None]):
                     "Unable to reach Telegram API. Please retry.", color="red"
                 )
                 self._refresh_first_run_gateways_next_state()
+                return
+            if worker.name == "first-run-config-apply":
+                self._finish_first_run_config_apply(
+                    ConfigApplyResult(
+                        ok=False,
+                        message="Configuration apply failed. No OAuth artifact was written.",
+                        status_lines=("Configuration apply failed. No OAuth artifact was written.",),
+                    )
+                )
                 return
 
     def on_select_changed(self, event: Select.Changed) -> None:
@@ -1827,12 +1846,71 @@ class HermesControlPanelApp(App[None]):
         self.query_one("#first-run-step-title", Static).update(
             "First-run configuration wizard: Review"
         )
+        action_lines = "\n".join(self.config_flow.review_action_lines())
         self._first_run_step_main().mount(
             Static("Review / Apply", classes="panel-title", id="first-run-review-title"),
             Static(review.redacted_diff, id="first-run-review-diff"),
+            Static(action_lines, id="first-run-review-action-lines"),
             Static("No .env changes are written until Apply.", id="first-run-review-helper"),
+            Static("No Deployment runs automatically.", id="first-run-review-deploy-helper"),
+            Button(
+                "Apply configuration",
+                id="first-run-review-apply",
+                variant="primary",
+                disabled=not review.can_apply,
+            ),
+            Static("", id="first-run-apply-status"),
         )
+        if not review.can_apply:
+            self._set_first_run_apply_status("\n".join(review.blocking_issues), color="red")
         self._refresh_first_run_sidebar()
+
+    def _set_first_run_apply_status(self, message: str, *, color: str = "white") -> None:
+        try:
+            status = self.query_one("#first-run-apply-status", Static)
+            status.update(message)
+            status.styles.color = color
+        except Exception:
+            return
+
+    def _apply_first_run_review_configuration(self) -> None:
+        if self._first_run_apply_loading:
+            return
+        review = self.config_flow.review()
+        if not review.can_apply:
+            self._set_first_run_apply_status("\n".join(review.blocking_issues), color="red")
+            return
+        self._first_run_apply_loading = True
+        try:
+            self.query_one("#first-run-review-apply", Button).disabled = True
+        except Exception:
+            pass
+        self._set_first_run_apply_status("Applying configuration...")
+
+        def progress(message: str) -> None:
+            _ = self.call_from_thread(self._set_first_run_apply_status, message)
+
+        def run_apply() -> ConfigApplyResult:
+            return self.config_flow.apply_review(review, progress=progress)
+
+        self.run_worker(
+            run_apply,
+            name="first-run-config-apply",
+            group="first-run-config-apply",
+            thread=True,
+            exclusive=True,
+        )
+
+    def _finish_first_run_config_apply(self, result: ConfigApplyResult) -> None:
+        self._first_run_apply_loading = False
+        if not result.ok:
+            try:
+                self.query_one("#first-run-review-apply", Button).disabled = False
+            except Exception:
+                pass
+            self._set_first_run_apply_status(result.message, color="red")
+            return
+        self._set_first_run_apply_status("\n".join(result.status_lines))
 
     @staticmethod
     def _cloud_region_label(region_value: str) -> str:
